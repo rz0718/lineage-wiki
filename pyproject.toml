@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lineage-wiki"
+version = "0.1.0"
+description = "OpenWiki for data products: a Python CLI that generates and maintains Open Knowledge Format (OKF) documentation."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.12",
+    "pydantic>=2.7",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+lineage-wiki = "lineage_wiki.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["lineage_wiki"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

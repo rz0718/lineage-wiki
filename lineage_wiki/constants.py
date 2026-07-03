@@ -1,0 +1,224 @@
+"""Shared constants: OKF page taxonomy, required sections, validation rules."""
+
+from __future__ import annotations
+
+# --- OKF page taxonomy -------------------------------------------------------
+
+# Title-cased page `type` labels, exactly as used in the OKF catalog.
+PAGE_TYPES = (
+    "Index",
+    "Framework",
+    "Component",
+    "Output",
+    "Code Link",
+    "Report Template",
+    "Change Check",
+    "Metric",
+)
+
+# okf/ subdirectory -> page type of the pages that live there.
+DIR_TO_TYPE = {
+    "frameworks": "Framework",
+    "components": "Component",
+    "outputs": "Output",
+    "report-templates": "Report Template",
+    "code-links": "Code Link",
+    "change-checks": "Change Check",
+    "metrics": "Metric",
+}
+
+TYPE_TO_DIR = {v: k for k, v in DIR_TO_TYPE.items()}
+
+OKF_SUBDIRS = tuple(DIR_TO_TYPE)
+
+# The eight index files maintained after every run, relative to the okf dir.
+INDEX_FILES = ("index.md",) + tuple(f"{d}/index.md" for d in OKF_SUBDIRS)
+
+# --- Frontmatter -------------------------------------------------------------
+
+# Frontmatter fields that carry relative Markdown references. The validator
+# resolves every `.md` path found (at any nesting depth) under these keys.
+REF_KEYS = (
+    "source_refs",
+    "framework_refs",
+    "component_refs",
+    "metric_refs",
+    "implementation_refs",
+    "code_refs",
+    "output_refs",
+    "report_refs",
+    "change_check",
+)
+
+PAGE_STATUSES = ("draft", "reviewed", "approved", "deprecated")
+
+# --- Required sections per page type (spec section 6) ------------------------
+
+REQUIRED_SECTIONS: dict[str, tuple[str, ...]] = {
+    "Index": (),
+    "Framework": (
+        "Scope",
+        "Core Assumptions",
+        "Core Formula",
+        "Components",
+        "Implementation",
+        "Outputs",
+        "Reports",
+        "Verification Status",
+        "Known Gaps",
+        "Known Doc-vs-Code Divergences",
+        "Source",
+    ),
+    "Component": (
+        "What It Represents",
+        "Factors Table",
+        "Formula / Logic",
+        "Inputs",
+        "Outputs",
+        "Edge Cases",
+        "Verification Status",
+        "Implementation Backlink",
+    ),
+    "Output": (
+        "Table",
+        "Grain",
+        "Column Definitions",
+        "Key Formula Mapping",
+        "Upstream Sources",
+        "Downstream Consumers",
+        "Verification Status",
+        "Implementation",
+    ),
+    "Code Link": (
+        "Repository",
+        "Implementation Areas",
+        "Input Tables Consumed",
+        "Outputs",
+        "Runtime Assumptions",
+        "Linked OKF Pages",
+    ),
+    "Report Template": (
+        "Purpose",
+        "Audience",
+        "Metrics Shown",
+        "Source Mapping",
+        "BigQuery Source Mapping",
+        "Interpretation Rules",
+        "Known Caveats",
+        "Verification Status",
+    ),
+    "Change Check": (
+        "How to Trigger a Review",
+        "Code Change Triggers",
+        "Output Change Triggers",
+        "Report Change Triggers",
+        "Reference Document Change Triggers",
+        "Required Agent Behavior",
+        "Impacted Pages",
+    ),
+    "Metric": (
+        "Definition",
+        "Business Meaning",
+        "Calculation Logic",
+        "Unit",
+        "Grain",
+        "Source References",
+        "Used By",
+        "Caveats",
+    ),
+}
+
+# --- Placeholder validation ---------------------------------------------------
+
+# Tokens that mark unfinished content. They fail validation unless they appear
+# inside a Known Gaps / open-issues style section, or inside an inline code
+# span (documentation *about* placeholders, e.g. `<path-TBD>`).
+PLACEHOLDER_PATTERN = r"\bTODO\b|\bTBD\b|\?{3}"
+
+# H2 section headings under which placeholder tokens are allowed.
+PLACEHOLDER_ALLOWED_SECTION_PATTERN = r"known gaps|open issues|gap|divergence"
+
+# --- init scaffolding ---------------------------------------------------------
+
+MANIFEST_DIR = ".lineage-wiki"
+MANIFEST_FILE = f"{MANIFEST_DIR}/manifest.yml"
+
+AGENT_INSTRUCTIONS_MARKER = "## OKF Wiki Context"
+
+AGENT_INSTRUCTIONS_BLOCK = """\
+## OKF Wiki Context
+
+This repository contains an Open Knowledge Format catalog under `okf/`.
+
+Start here:
+- [OKF index](okf/index.md)
+
+When working on data products, formulas, BigQuery tables, dashboards, risk
+definitions, PnL methodology, spread methodology, treasury definitions, or
+liquidity definitions:
+
+1. Start from `okf/index.md`.
+2. Follow links to the relevant framework, component, output, code-link,
+   metric, report-template, and change-check pages.
+3. Do not change formulas, table mappings, or report behavior without
+   updating the relevant OKF pages.
+4. If code and OKF conflict, flag the divergence and update the relevant
+   change-check page.
+5. Do not invent formulas, code paths, output columns, or report behavior
+   when the traceability chain is missing.
+"""
+
+# Prompt stubs written by `lineage-wiki init`. The LLM pipeline that consumes
+# them lands in a later milestone; the files exist so runs are configurable
+# from day one.
+PROMPT_STUBS: dict[str, str] = {
+    "system.md": """\
+# Lineage Wiki — System Prompt
+
+You maintain an Open Knowledge Format (OKF) catalog for data products.
+
+Rules:
+
+1. Never invent formulas, table columns, code paths, dashboard behavior, or
+   business definitions.
+2. If evidence is missing, create a Known Gap instead of guessing.
+3. If raw documentation conflicts with code or BigQuery schema, record a
+   Known Doc-vs-Code Divergence.
+4. Prefer implementation evidence in this order: raw methodology, source
+   code, BigQuery schema/SQL, report mapping, human notes.
+5. Every formula must cite or link to at least one source.
+6. Work only inside the target repository and configured source paths.
+7. Do not read secrets, `.env` files, private keys, tokens, or credential
+   files.
+""",
+    "page_planner.md": """\
+# Page Planner Prompt
+
+Given normalized evidence for one chain, plan the OKF pages to create or
+update: framework, components, outputs, code links, report templates,
+change checks, and metrics. Plan surgical edits during update runs — touch
+only pages affected by changed evidence.
+""",
+    "extractor.md": """\
+# Extractor Prompt
+
+Extract formulas, business definitions, components, source tables, output
+tables, code paths, report mappings, gaps, and divergences from the supplied
+evidence items. Every extracted fact must cite at least one evidence item.
+""",
+    "writer.md": """\
+# Writer Prompt
+
+Write OKF Markdown pages using the catalog's frontmatter style, title-cased
+page types, and required sections for each type. Keep concepts canonical:
+detailed definition in one page, lightweight links elsewhere. Preserve
+existing useful wording when it remains accurate.
+""",
+    "reviewer.md": """\
+# Reviewer Prompt
+
+Review generated pages against the evidence. Reject any formula, column,
+code path, or report behavior that lacks a citation. Confirm required
+sections, resolvable links, and index membership.
+""",
+}

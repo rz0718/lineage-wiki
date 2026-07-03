@@ -1,0 +1,149 @@
+"""Chain config parsing and validation (spec section 5)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Literal
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+from .util import slugify
+
+
+class ConfigError(Exception):
+    """Raised when a chain config file cannot be loaded or validated."""
+
+
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ChainSpec(_StrictModel):
+    id: str
+    slug: str = ""
+    name: str
+    domain: str | None = None
+    owner: str | None = None
+    description: str = ""
+
+    @field_validator("id", "name")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must be non-empty")
+        return value
+
+    def model_post_init(self, __context) -> None:
+        if not self.slug:
+            self.slug = slugify(self.id)
+
+
+class RawDocSource(_StrictModel):
+    path: str
+    type: str = "methodology"
+    required: bool = False
+
+
+class RepoSource(_StrictModel):
+    name: str
+    host: str = "github"
+    url: str | None = None
+    branch: str = "main"
+    local_path: str | None = None
+    paths: list[str] = Field(default_factory=list)
+    symbols: list[str] = Field(default_factory=list)
+    required: bool = True
+
+
+class BigQuerySource(_StrictModel):
+    project: str | None = None
+    datasets: list[str] = Field(default_factory=list)
+    tables: list[str] = Field(default_factory=list)
+    include_sample_rows: bool = False
+    required: bool = True
+
+
+class ReportSource(_StrictModel):
+    name: str
+    type: str = "slack_or_dashboard"
+    url: str = ""
+    source_mapping_notes: str = ""
+    required: bool = False
+
+
+class HumanNote(_StrictModel):
+    title: str
+    content: str
+
+
+class MetricInput(_StrictModel):
+    """Business term / metric supplied as chain input (optional)."""
+
+    name: str
+    definition: str = ""
+    unit: str = ""
+    grain: str = ""
+
+
+class SourcesSpec(_StrictModel):
+    raw_docs: list[RawDocSource] = Field(default_factory=list)
+    repos: list[RepoSource] = Field(default_factory=list)
+    bigquery: BigQuerySource | None = None
+    reports: list[ReportSource] = Field(default_factory=list)
+    human_notes: list[HumanNote] = Field(default_factory=list)
+    metrics: list[MetricInput] = Field(default_factory=list)
+
+
+class GenerationSpec(_StrictModel):
+    output_dir: str = "okf"
+    raw_files_dir: str = "raw_files"
+    overwrite_policy: Literal["fail_if_exists", "update_existing"] = "update_existing"
+    create_missing_metrics: bool = True
+    update_indexes: bool = True
+    require_citations: bool = True
+    mark_unknowns_as_gaps: bool = True
+    preserve_manual_sections: bool = True
+
+
+class ModelSpec(_StrictModel):
+    provider: str = "openai"
+    model: str = ""
+    temperature: float = 0.0
+
+
+class ValidationSpec(_StrictModel):
+    require_frontmatter: bool = True
+    require_links_resolve: bool = True
+    require_frontmatter_refs_resolve: bool = True
+    require_source_citations: bool = True
+    fail_on_uncited_formula: bool = True
+    fail_on_placeholders_outside_known_gaps: bool = True
+
+
+class ChainConfig(_StrictModel):
+    chain: ChainSpec
+    sources: SourcesSpec = Field(default_factory=SourcesSpec)
+    generation: GenerationSpec = Field(default_factory=GenerationSpec)
+    model: ModelSpec = Field(default_factory=ModelSpec)
+    validation: ValidationSpec = Field(default_factory=ValidationSpec)
+
+
+def load_config(path: str | Path) -> ChainConfig:
+    """Load and validate a chain YAML config file."""
+    path = Path(path)
+    if not path.exists():
+        raise ConfigError(f"config file not found: {path}")
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"{path}: invalid YAML: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{path}: config must be a YAML mapping")
+    try:
+        return ChainConfig.model_validate(raw)
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}" for err in exc.errors()
+        )
+        raise ConfigError(f"{path}: invalid config: {problems}") from exc

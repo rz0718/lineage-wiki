@@ -1,0 +1,86 @@
+# Example chain config for lineage-wiki.
+#
+# One file describes one chain / data-product vertical. Run:
+#
+#   lineage-wiki generate --config chains/example.yml
+#
+# to scaffold the OKF pages for this chain under okf/.
+
+chain:
+  id: example_chain
+  slug: example-chain
+  name: Example Chain
+  domain: financial_data_product
+  owner: Data Team
+  description: Example end-to-end data product chain used to exercise the lineage-wiki scaffold.
+
+sources:
+  raw_docs:
+    - path: raw_files/example/methodology.md
+      type: methodology
+      required: false
+
+  repos:
+    - name: example-pipeline
+      host: github
+      url: git@github.com:example-org/example-pipeline.git
+      branch: main
+      local_path: ../example-pipeline
+      paths:
+        - pipeline/main.py
+        - pipeline/utils.py
+      symbols:
+        - compute_daily_snapshot
+      # required: true makes the run fail when the local clone is missing;
+      # false records the missing clone as a Known Gap instead.
+      required: false
+
+  bigquery:
+    project: example-project
+    datasets:
+      - analytics
+    tables:
+      - example-project.analytics.example_daily_snapshot
+    include_sample_rows: false
+    required: true
+
+  reports:
+    - name: Example Daily Report
+      type: slack_or_dashboard
+      url: ""
+      source_mapping_notes: ""
+      required: false
+
+  human_notes:
+    - title: Review caveat
+      content: "Scaffold example only; replace with a real chain."
+
+  # Optional business terms / metrics supplied as chain input.
+  metrics:
+    - name: Example Metric
+      definition: "Total example value per day."
+      unit: IDR
+      grain: daily
+
+generation:
+  output_dir: okf
+  raw_files_dir: raw_files/example
+  overwrite_policy: update_existing
+  create_missing_metrics: true
+  update_indexes: true
+  require_citations: true
+  mark_unknowns_as_gaps: true
+  preserve_manual_sections: true
+
+model:
+  provider: openai
+  model: ""  # set when the LLM milestones land; unused by deterministic runs
+  temperature: 0
+
+validation:
+  require_frontmatter: true
+  require_links_resolve: true
+  require_frontmatter_refs_resolve: true
+  require_source_citations: true
+  fail_on_uncited_formula: true
+  fail_on_placeholders_outside_known_gaps: true
