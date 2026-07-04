@@ -16,6 +16,7 @@ from ..constants import (
     GENERATED_MARKER,
     MANIFEST_DIR,
     OKF_SUBDIRS,
+    PRESERVED_SECTIONS,
     PROMPT_STUBS,
 )
 from ..examples import EXAMPLE_CHAIN_YAML
@@ -123,6 +124,7 @@ def _write_page(
     *,
     preserve: bool = True,
     dry_run: bool = False,
+    force_sections: tuple[str, ...] = (),
 ) -> None:
     target = root / rel
     if target.exists():
@@ -132,7 +134,9 @@ def _write_page(
             return
         existing = target.read_text(encoding="utf-8")
         if preserve:
-            content = merge_manual_sections(existing, content)
+            content = merge_manual_sections(
+                existing, content, force=force_sections
+            )
         if materially_equal(existing, content):
             out.unchanged.append(rel)
             return
@@ -365,6 +369,7 @@ class GenerateResult(WriteOutcome):
     dry_run: bool = False
     evidence: list[str] = field(default_factory=list)
     verification: list[str] = field(default_factory=list)
+    llm: list[str] = field(default_factory=list)
 
 
 def run_generate(
@@ -373,6 +378,8 @@ def run_generate(
     now: str | None = None,
     *,
     dry_run: bool = False,
+    use_llm: bool = False,
+    llm_provider=None,
 ) -> GenerateResult:
     """Deterministically scaffold one chain's OKF pages, indexes, and manifest.
 
@@ -388,6 +395,32 @@ def run_generate(
     result = GenerateResult(gaps=plan.gaps, dry_run=dry_run)
     result.evidence = _describe_evidence(cfg, plan.bundle)
     result.verification = _describe_verification(cfg, plan.bundle)
+
+    # Sections the current run intentionally rewrote (LLM pipeline output);
+    # they bypass preservation so a fresh LLM run can update its own content.
+    force_by_rel: dict[str, tuple[str, ...]] = {}
+    enrichment = None
+    if use_llm:
+        # Imported lazily: the deterministic default path never touches
+        # provider code and never needs a model.
+        from ..credentials import resolve_llm_provider
+        from .llm_pipeline import run_llm_enrichment
+
+        provider = llm_provider or resolve_llm_provider(
+            cfg.model.provider, cfg.model.model
+        )
+        enrichment = run_llm_enrichment(cfg, root, plan, provider)
+        for draft in plan.pages:
+            if draft.rel_path in enrichment.drafts:
+                draft.content = enrichment.drafts[draft.rel_path]
+        for rel, sections in enrichment.sections_written.items():
+            force_by_rel[rel] = tuple(sections)
+        if enrichment.divergences:
+            framework_rel = f"{cfg.generation.output_dir}/frameworks/{cfg.chain.slug}.md"
+            force_by_rel[framework_rel] = force_by_rel.get(framework_rel, ()) + (
+                "Known Doc-vs-Code Divergences",
+            )
+        result.llm = enrichment.summary
 
     previous = load_manifest(root)
     owned = set(previous.generated_files) if previous else set()
@@ -405,6 +438,7 @@ def run_generate(
         _write_page(
             root, draft.rel_path, draft.content, owned, result,
             preserve=preserve, dry_run=dry_run,
+            force_sections=force_by_rel.get(draft.rel_path, ()),
         )
 
     if dry_run:
@@ -431,6 +465,10 @@ def run_generate(
         result.manifest_written = True
 
     result.run_file = _record_run(cfg, root, now, "generate", plan, result)
+    if enrichment is not None and result.content_changed():
+        from ..storage.runs import write_json_run
+
+        write_json_run(root, now, "generate-llm", enrichment.transcript)
     result.report = validate_tree(root, okf_dir=cfg.generation.output_dir)
     return result
 

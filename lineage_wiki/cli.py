@@ -1,4 +1,4 @@
-"""`lineage-wiki` CLI: init, generate, update, verify-bq, validate."""
+"""`lineage-wiki` CLI: init, generate, update, verify-bq, validate, configure."""
 
 from __future__ import annotations
 
@@ -8,11 +8,20 @@ from typing import Annotated, Optional
 import typer
 
 from . import __version__
+from .agent.llm_pipeline import LLMPipelineError
 from .agent.runner import GenerateError, run_generate, run_init, run_update
 from .config import ChainConfig, ConfigError, load_config
 from .connectors import SourceUnavailableError
+from .credentials import (
+    LocalModelConfig,
+    config_path,
+    describe_local_config,
+    load_local_config,
+    save_local_config,
+)
 from .okf.validator import ValidationReport, validate_tree
 from .okf.verifier import VerificationError, run_verify_bq
+from .providers import ProviderError
 
 app = typer.Typer(
     name="lineage-wiki",
@@ -134,6 +143,16 @@ def generate(
             help="Report what the run would do without writing any file.",
         ),
     ] = False,
+    use_llm: Annotated[
+        bool,
+        typer.Option(
+            "--use-llm",
+            help=(
+                "Enrich planned pages with grounded, evidence-cited LLM "
+                "content. Default is fully deterministic (no model calls)."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Deterministically scaffold one chain's OKF pages, indexes, and manifest."""
     if target_repo is not None:
@@ -145,10 +164,13 @@ def generate(
         raise typer.Exit(code=1)
 
     try:
-        result = run_generate(cfg, root, dry_run=dry_run)
-    except (GenerateError, SourceUnavailableError) as exc:
+        result = run_generate(cfg, root, dry_run=dry_run, use_llm=use_llm)
+    except (GenerateError, SourceUnavailableError, ProviderError, LLMPipelineError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(code=1)
+
+    for line in result.llm:
+        typer.echo(f"llm       {line}")
 
     if dry_run:
         typer.secho(
@@ -282,6 +304,74 @@ def verify_bq(
         typer.secho("verify-bq FAILED — see issues above.", fg=typer.colors.RED)
         raise typer.Exit(code=1)
     typer.secho("verify-bq OK.", fg=typer.colors.GREEN)
+
+
+@app.command()
+def configure(
+    provider: Annotated[
+        Optional[str],
+        typer.Option("--provider", help="LLM provider: openai or anthropic."),
+    ] = None,
+    model: Annotated[
+        Optional[str], typer.Option("--model", help="Model id.")
+    ] = None,
+    base_url: Annotated[
+        Optional[str],
+        typer.Option("--base-url", help="Override the provider API base URL."),
+    ] = None,
+    api_key_env: Annotated[
+        Optional[str],
+        typer.Option(
+            "--api-key-env",
+            help=(
+                "NAME of the environment variable holding the API key "
+                "(e.g. OPENAI_API_KEY). Keys themselves are never stored."
+            ),
+        ),
+    ] = None,
+    temperature: Annotated[
+        Optional[float], typer.Option("--temperature", help="Sampling temperature.")
+    ] = None,
+    show: Annotated[
+        bool,
+        typer.Option("--show", help="Print the current configuration (no secrets)."),
+    ] = False,
+) -> None:
+    """Store provider/model settings in ~/.lineage-wiki/config.yml.
+
+    Secrets never touch this file or this terminal: only the *name* of the
+    environment variable to read the API key from is recorded.
+    """
+    existing = load_local_config() or LocalModelConfig()
+    if show and provider is None and model is None:
+        if not existing.provider:
+            typer.secho(
+                f"no local model config yet ({config_path()}) — run "
+                "`lineage-wiki configure --provider openai --model <id>`",
+                fg=typer.colors.YELLOW,
+            )
+            raise typer.Exit()
+        for line in describe_local_config(existing):
+            typer.echo(line)
+        raise typer.Exit()
+
+    updated = LocalModelConfig(
+        provider=(provider if provider is not None else existing.provider),
+        model=(model if model is not None else existing.model),
+        base_url=(base_url if base_url is not None else existing.base_url),
+        api_key_env=(api_key_env if api_key_env is not None else existing.api_key_env),
+        temperature=(
+            temperature if temperature is not None else existing.temperature
+        ),
+    )
+    try:
+        path = save_local_config(updated)
+    except ProviderError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    typer.secho(f"wrote {path} (mode 600, no secrets stored)", fg=typer.colors.GREEN)
+    for line in describe_local_config(updated):
+        typer.echo(line)
 
 
 @app.command()

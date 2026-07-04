@@ -42,14 +42,42 @@ def _joined(parts: list[str]) -> str:
     return "\n\n".join(normalized) + "\n"
 
 
+# Marker that LLM-written bodies must carry (one per citation); its
+# presence identifies evidence-written content that scaffold rewrites keep.
+CITATION_MARK = "[src:"
+
+# Prefix for Known Gaps bullets added by the LLM pipeline; deterministic
+# rewrites carry them over instead of reverting them to scaffold gaps.
+LLM_GAP_PREFIX = "- (llm)"
+
+
+def _merge_gap_block(existing_block: str, draft_block: str) -> str:
+    carried = [
+        line
+        for line in existing_block.splitlines()
+        if line.startswith(LLM_GAP_PREFIX) and line not in draft_block
+    ]
+    if not carried:
+        return draft_block
+    return draft_block.rstrip("\n") + "\n" + "\n".join(carried) + "\n"
+
+
 def merge_manual_sections(
-    existing: str, draft: str, preserved: tuple[str, ...] = PRESERVED_SECTIONS
+    existing: str,
+    draft: str,
+    preserved: tuple[str, ...] = PRESERVED_SECTIONS,
+    force: tuple[str, ...] = (),
 ) -> str:
     """Render ``draft`` while keeping manual content from ``existing``:
 
+    - a section named in ``force`` always takes the draft body (the current
+      run intentionally rewrote it, e.g. the LLM pipeline);
     - a section named in ``preserved`` keeps its existing body;
-    - sections present only in ``existing`` are retained (appended after the
-      draft's sections, in their original order).
+    - a section whose existing body carries ``[src: …]`` citations is
+      evidence-written (LLM run) and survives a scaffold rewrite;
+    - ``Known Gaps`` keeps ``- (llm)`` bullets from previous LLM runs;
+    - sections present only in ``existing`` are retained (appended after
+      the draft's sections, in their original order).
     """
     _, existing_sections = split_sections(existing)
     draft_prelude, draft_sections = split_sections(draft)
@@ -61,12 +89,51 @@ def merge_manual_sections(
 
     parts = [draft_prelude]
     for heading, block in draft_sections:
-        if heading in preserved and heading in existing_by_heading:
-            parts.append(existing_by_heading[heading])
+        old = existing_by_heading.get(heading)
+        if heading in force or old is None:
+            parts.append(block)
+        elif heading in preserved:
+            parts.append(old)
+        elif heading == "Known Gaps":
+            parts.append(_merge_gap_block(old, block))
+        elif CITATION_MARK in old and CITATION_MARK not in block:
+            parts.append(old)
         else:
             parts.append(block)
     for heading, block in existing_sections:
         if heading not in draft_headings:
+            parts.append(block)
+    return _joined(parts)
+
+
+def replace_section(text: str, heading: str, body: str) -> str:
+    """Replace the body of ``## heading`` (keeping the heading line).
+    Returns ``text`` unchanged when the section is absent."""
+    prelude, sections = split_sections(text)
+    if all(h != heading for h, _ in sections):
+        return text
+    parts = [prelude]
+    for h, block in sections:
+        if h == heading:
+            parts.append(f"## {heading}\n\n{body.strip()}\n")
+        else:
+            parts.append(block)
+    return _joined(parts)
+
+
+def append_to_section(text: str, heading: str, lines: list[str]) -> str:
+    """Append lines to the end of ``## heading``'s body. Returns ``text``
+    unchanged when the section is absent or ``lines`` is empty."""
+    if not lines:
+        return text
+    prelude, sections = split_sections(text)
+    if all(h != heading for h, _ in sections):
+        return text
+    parts = [prelude]
+    for h, block in sections:
+        if h == heading:
+            parts.append(block.rstrip("\n") + "\n" + "\n".join(lines) + "\n")
+        else:
             parts.append(block)
     return _joined(parts)
 

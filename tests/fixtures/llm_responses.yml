@@ -1,0 +1,74 @@
+# Canned LLM stage responses for tests and credential-free demos:
+#
+#   LINEAGE_WIKI_LLM_FIXTURES=tests/fixtures/llm_responses.yml \
+#   LINEAGE_WIKI_BQ_FIXTURES=tests/fixtures/bigquery_schemas.yml \
+#     uv run lineage-wiki generate --config chains/example.yml \
+#     --root <target> --use-llm
+#
+# Keyed by pipeline stage. A string answers every call; a list is consumed
+# per call; a mapping matches keys as prompt substrings (page rel-paths).
+#
+# The responses deliberately include groundable and ungroundable output so
+# the deterministic grounding layer's behavior is visible:
+# - claim c1 (formula, quote present in the raw doc)      -> accepted
+# - claim c2 (column, backed by ingested BQ schema)       -> accepted
+# - claim c3 (formula, quote NOT in the evidence)         -> rejected, Known Gap
+# - claim c4 (fact citing an unknown evidence id)         -> rejected
+# - claim c5 (code_path with no repo-file evidence)       -> rejected
+# - the output page's section contains SQL                -> rejected
+responses:
+  page_planner: |
+    {"pages": [
+      {"rel_path": "okf/frameworks/example-chain.md",
+       "sections": ["Scope", "Core Formula", "Known Gaps"],
+       "evidence_ids": ["raw-doc:raw_files/example/methodology.md"]},
+      {"rel_path": "okf/outputs/example-daily-snapshot.md",
+       "sections": ["Grain"],
+       "evidence_ids": ["bq-schema:example-project.analytics.example_daily_snapshot"]},
+      {"rel_path": "okf/invented/not-in-plan.md", "sections": ["Scope"],
+       "evidence_ids": []}
+    ]}
+  extractor: |
+    {"claims": [
+      {"id": "c1", "kind": "formula",
+       "text": "total_value = quantity * price",
+       "evidence_ids": ["raw-doc:raw_files/example/methodology.md"],
+       "quote": "Total value = quantity * price"},
+      {"id": "c2", "kind": "column",
+       "text": "The daily snapshot exposes a total_value column.",
+       "evidence_ids": ["bq-schema:example-project.analytics.example_daily_snapshot"],
+       "quote": ""},
+      {"id": "c3", "kind": "formula",
+       "text": "profit = revenue - cost",
+       "evidence_ids": ["raw-doc:raw_files/example/methodology.md"],
+       "quote": "this sentence does not appear in the methodology"},
+      {"id": "c4", "kind": "fact",
+       "text": "An invented fact with a bogus citation.",
+       "evidence_ids": ["raw-doc:does-not-exist.md"], "quote": ""},
+      {"id": "c5", "kind": "code_path",
+       "text": "Computed in pipeline.py",
+       "evidence_ids": ["raw-doc:raw_files/example/methodology.md"], "quote": ""}
+    ],
+    "conflicts": [
+      {"topic": "Fee handling",
+       "detail": "The methodology says fees are included in total_value, but the ingested schema has no fee column.",
+       "evidence_ids": ["raw-doc:raw_files/example/methodology.md",
+                        "bq-schema:example-project.analytics.example_daily_snapshot"]}
+    ]}
+  writer:
+    "okf/frameworks/example-chain.md": |
+      {"sections": [
+        {"heading": "Scope",
+         "body": "Covers the daily example metric snapshot pipeline. [src: raw-doc:raw_files/example/methodology.md]"},
+        {"heading": "Core Formula",
+         "body": "`total_value = quantity * price` [src: raw-doc:raw_files/example/methodology.md]"},
+        {"heading": "Known Gaps",
+         "body": "The model must not write this section. [src: raw-doc:raw_files/example/methodology.md]"}
+      ]}
+    "okf/outputs/example-daily-snapshot.md": |
+      {"sections": [
+        {"heading": "Grain",
+         "body": "```sql\nSELECT * FROM example_daily_snapshot\n```\n[src: bq-schema:example-project.analytics.example_daily_snapshot]"}
+      ]}
+  reviewer: |
+    {"verdict": "approve", "rejected_sections": [], "issues": []}

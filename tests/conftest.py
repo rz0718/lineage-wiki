@@ -19,6 +19,17 @@ def _bigquery_offline(monkeypatch):
     monkeypatch.setenv("LINEAGE_WIKI_BQ_OFFLINE", "1")
 
 
+@pytest.fixture(autouse=True)
+def _llm_isolated(monkeypatch, tmp_path_factory):
+    """Unit tests never call a live model and never read the developer's
+    real ~/.lineage-wiki config. Tests that want mocked responses set
+    LINEAGE_WIKI_LLM_FIXTURES or pass a provider explicitly."""
+    monkeypatch.delenv("LINEAGE_WIKI_LLM_FIXTURES", raising=False)
+    monkeypatch.setenv(
+        "LINEAGE_WIKI_HOME", str(tmp_path_factory.mktemp("lineage-wiki-home"))
+    )
+
+
 @pytest.fixture
 def example_cfg() -> ChainConfig:
     return load_config(EXAMPLE_CONFIG)

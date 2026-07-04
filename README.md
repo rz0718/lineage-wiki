@@ -24,6 +24,7 @@ Commands:
 - `lineage-wiki update --config chains/<chain>.yml` — diffs source fingerprints (raw doc hashes, local repo git HEAD + path hashes, BigQuery schema hashes, report/config identity) against the manifest, prints an impact plan, and rewrites only affected tool-owned pages. With no source changes it is a strict no-op: no file writes, no manifest churn, no run metadata. BigQuery schema fingerprints ignore last-modified metadata, so plain data loads never trigger rewrites — only real schema changes do.
 - `lineage-wiki verify-bq --config chains/<chain>.yml` — optional, credentialed BigQuery verification (`bigquery_verification` config block). `schema_only` mode checks that configured tables and expected columns exist and fingerprints/capture partitioning, clustering, and view SQL; `profile` mode adds safe aggregate queries (row count, date coverage, null counts, distinct counts, min/max). Detailed results — including SQL and profiled values — go to `.lineage-wiki/runs/<run-id>.json`; OKF output pages receive only summary conclusions under `## Verification Status`.
 - `lineage-wiki validate` — frontmatter, page types, required sections, relative links, frontmatter refs, placeholder checks, and directory-index/metrics-registry membership. Offline only — never calls BigQuery or an LLM.
+- `lineage-wiki configure` — store provider/model settings in `~/.lineage-wiki/config.yml` (outside any target repo). Only the *name* of the API-key environment variable is recorded; secret values are never stored, read back, or printed.
 
 ## Install
 
@@ -195,6 +196,57 @@ Unit tests use mocked responses only. A real-BigQuery smoke test is
 integration-only: `LINEAGE_WIKI_BQ_INTEGRATION=1 uv run pytest -m bq_integration`
 (target table via `LINEAGE_WIKI_BQ_INTEGRATION_TABLE`).
 
+## LLM extraction (`--use-llm`)
+
+The default pipeline is fully deterministic and never calls a model.
+`generate --use-llm` adds a grounded enrichment pass: planner → extractor →
+writer → reviewer, all exchanging strict JSON, all filtered through
+deterministic grounding checks in plain Python — the model is never trusted
+to verify itself:
+
+- every claim must cite known `EvidenceItem` ids or it is dropped;
+- **formula** claims must cite methodology/code/note evidence and carry a
+  verbatim quote found in that evidence — rejected formulas become
+  `- (llm)` Known Gap entries instead of being published;
+- **column** claims must cite ingested BigQuery schema evidence and name a
+  real column from the cited schema;
+- **code path** claims must cite loaded repository-file evidence;
+- accepted conflicts are written to the framework page's
+  `## Known Doc-vs-Code Divergences` with their evidence ids;
+- written sections must carry `[src: <evidence-id>]` markers pointing at
+  accepted claims, and section bodies containing SQL are rejected outright
+  (verify-bq's config-validated templates remain the only SQL source);
+- the pipeline can only rewrite `## ` sections of pages the deterministic
+  plan already contains — no file creation, no free-form repo editing —
+  and it never writes `Known Gaps`, `Verification Status`, or the
+  divergences section directly.
+
+Sections written by an LLM run (recognizable by their citations) survive
+later deterministic generate/update runs; only a new `--use-llm` run
+rewrites them. The full stage transcript (claims accepted/rejected with
+reasons) goes to `.lineage-wiki/runs/<run-id>-generate-llm.json`.
+
+```bash
+# Mocked run — no credentials, no network (see the fixtures for the shape):
+LINEAGE_WIKI_LLM_FIXTURES=tests/fixtures/llm_responses.yml \
+LINEAGE_WIKI_BQ_FIXTURES=tests/fixtures/bigquery_schemas.yml \
+  uv run lineage-wiki generate --config chains/example.yml \
+  --root /path/to/wiki-repo --use-llm
+
+# Real run — configure once (no secrets stored), export the key, then:
+uv run lineage-wiki configure --provider openai --model <model-id> \
+  --api-key-env OPENAI_API_KEY
+export OPENAI_API_KEY=...   # never written to disk by lineage-wiki
+uv run lineage-wiki generate --config chains/<chain>.yml --use-llm
+```
+
+Provider resolution: `LINEAGE_WIKI_LLM_FIXTURES` (mock) →
+`~/.lineage-wiki/config.yml` (`configure`; OpenAI-compatible and
+Anthropic-compatible endpoints) → the chain config's `model:` block.
+`--use-llm` composes with `--dry-run` (the enrichment is previewed, nothing
+is written). Prompts live in `.lineage-wiki/prompts/*.md` in the target
+repo (written by `init`) and can be edited per repo.
+
 ## Tests
 
 ```bash
@@ -212,9 +264,11 @@ LW_UPDATE_SNAPSHOTS=1 uv run pytest tests/test_snapshots.py
 
 ```text
 lineage_wiki/
-  cli.py            Typer CLI (init, generate, validate)
+  cli.py            Typer CLI (init, generate, update, verify-bq, validate, configure)
   config.py         Pydantic chain-config models
   constants.py      OKF taxonomy, required sections, validation rules
+  providers.py      LLM provider abstraction (OpenAI-compatible, Anthropic, mock)
+  credentials.py    ~/.lineage-wiki/config.yml — provider settings, never secrets
   okf/
     schemas.py      OkfPage model, frontmatter render/parse
     templates.py    deterministic Markdown templates for all page types
@@ -227,6 +281,9 @@ lineage_wiki/
   agent/
     runner.py       deterministic init/generate/update runs
     planner.py      update impact planning
+    prompts.py      stage prompt assembly (stubs overridable per target repo)
+    grounding.py    deterministic evidence checks for all LLM output
+    llm_pipeline.py planner -> extractor -> writer -> reviewer enrichment
   connectors/
     raw_doc_connector.py     local raw Markdown/text docs
     local_repo_connector.py  configured paths from local clones
