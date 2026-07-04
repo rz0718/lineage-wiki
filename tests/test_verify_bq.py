@@ -319,7 +319,7 @@ def test_disabled_verification_fails_clearly(example_cfg, wiki_root):
 
 
 def test_unimplemented_mode_fails_clearly(verify_cfg, wiki_root):
-    verify_cfg.bigquery_verification.mode = "formula_check"
+    verify_cfg.bigquery_verification.mode = "full_verification"
     with pytest.raises(VerificationError, match="not implemented"):
         _verify(verify_cfg, wiki_root)
 
@@ -363,7 +363,7 @@ def test_cli_verify_bq_with_fixtures(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "mode      profile" in result.output
     assert SNAPSHOT_TABLE in result.output
-    assert "Verification Status updated" in result.output
+    assert "verification sections updated" in result.output
     assert "verify-bq OK." in result.output
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -158,13 +159,58 @@ class ProfilingSpec(_StrictModel):
     include_min_max: bool = True
 
 
-class FormulaChecksSpec(_StrictModel):
-    """Accepted for spec compatibility; formula checks land in phase 2."""
+_EXPRESSION_ALLOWED = re.compile(r"^[A-Za-z0-9_`.\s+\-*/(),]+$")
+_EXPRESSION_KEYWORDS = re.compile(
+    r"(?i)\b(select|insert|update|delete|merge|drop|create|alter|union|join"
+    r"|from|where|call|exec|execute|grant|declare)\b"
+)
 
+
+def _validate_expression(expr: str) -> str:
+    """Formula expressions are arithmetic over column names — never SQL
+    statements. Anything that could smuggle in a query is rejected here so
+    generated verification SQL stays a pure deterministic template."""
+    if not expr.strip():
+        raise ValueError("formula expression must be non-empty")
+    if ";" in expr or "--" in expr or "/*" in expr:
+        raise ValueError(f"formula expression {expr!r} contains forbidden tokens")
+    if not _EXPRESSION_ALLOWED.match(expr):
+        raise ValueError(
+            f"formula expression {expr!r} contains characters outside the "
+            "allowed set (identifiers, numbers, + - * / ( ) , . ` )"
+        )
+    if _EXPRESSION_KEYWORDS.search(expr):
+        raise ValueError(f"formula expression {expr!r} contains SQL keywords")
+    return expr.strip()
+
+
+class FormulaCheck(_StrictModel):
+    """One explicitly configured, deterministic formula check."""
+
+    name: str
+    table: str
+    expression: str
+    expected_expression: str
+    date_column: str | None = None
+    tolerance_absolute: float | None = None
+    tolerance_relative: float | None = None
+
+    @field_validator("expression", "expected_expression")
+    @classmethod
+    def _safe_expression(cls, value: str) -> str:
+        return _validate_expression(value)
+
+
+class ToleranceSpec(_StrictModel):
+    absolute: float = 0.01
+    relative: float = 0.0001
+
+
+class FormulaChecksSpec(_StrictModel):
     enabled: bool = False
-    date_window_days: int = 90
-    tolerance: dict = Field(default_factory=dict)
-    checks: list[dict] = Field(default_factory=list)
+    date_window_days: int = Field(default=90, gt=0)
+    tolerance: ToleranceSpec = Field(default_factory=ToleranceSpec)
+    checks: list[FormulaCheck] = Field(default_factory=list)
 
 
 class StoreResultsSpec(_StrictModel):

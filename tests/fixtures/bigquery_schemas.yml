@@ -67,3 +67,10 @@ profiles:
       price:
         min: 900000
         max: 1250000
+
+# Mocked formula-check results for verify-bq (formula_check mode), keyed by
+# check name. Aggregate counts only.
+formula_checks:
+  example_total_value_formula:
+    checked_rows: 187
+    mismatch_rows: 0

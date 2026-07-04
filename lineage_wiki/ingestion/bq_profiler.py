@@ -179,14 +179,22 @@ def build_profile_plan(
 
 
 class FixtureProfileClient:
-    """Mocked profiling results from the ``profiles:`` section of the schema
-    fixture file — keyed by fully qualified table name, with semantic keys
-    (row_count / date / nulls / distinct / min_max)."""
+    """Mocked query results from the schema fixture file: the ``profiles:``
+    section answers profiling plans (keyed by fully qualified table name,
+    semantic keys row_count / date / nulls / distinct / min_max) and the
+    ``formula_checks:`` section answers formula plans (keyed by check name,
+    with checked_rows / mismatch_rows)."""
 
     kind = "fixtures"
 
-    def __init__(self, profiles: dict[str, dict], origin: str = "<memory>") -> None:
+    def __init__(
+        self,
+        profiles: dict[str, dict],
+        formulas: dict[str, dict] | None = None,
+        origin: str = "<memory>",
+    ) -> None:
         self._profiles = profiles
+        self._formulas = formulas or {}
         self.origin = origin
 
     @classmethod
@@ -197,8 +205,16 @@ class FixtureProfileClient:
                 f"BigQuery fixture file not found: {path} ({FIXTURES_ENV})"
             )
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        profiles = data.get("profiles", {}) if isinstance(data, dict) else {}
-        return cls(profiles, origin=str(path))
+        if not isinstance(data, dict):
+            data = {}
+        return cls(
+            data.get("profiles", {}),
+            formulas=data.get("formula_checks", {}),
+            origin=str(path),
+        )
+
+    def run_formula(self, plan, max_bytes_billed: int) -> dict[str, Any]:
+        return dict(self._formulas.get(plan.name, {}))
 
     def run_profile(self, plan: ProfileQueryPlan, max_bytes_billed: int) -> dict[str, Any]:
         fixture = self._profiles.get(plan.table_id, {})
@@ -220,8 +236,9 @@ class FixtureProfileClient:
 
 
 class GoogleProfileClient:
-    """Aggregate profiling over ``google-cloud-bigquery``. Every query runs
-    with ``maximum_bytes_billed`` set and standard SQL."""
+    """Aggregate profiling and formula queries over
+    ``google-cloud-bigquery``. Every query runs with ``maximum_bytes_billed``
+    set and standard SQL."""
 
     kind = "google"
 
@@ -231,13 +248,19 @@ class GoogleProfileClient:
         self._bigquery = bigquery
         self._client = bigquery.Client(project=project)
 
-    def run_profile(self, plan: ProfileQueryPlan, max_bytes_billed: int) -> dict[str, Any]:
+    def _query_single_row(self, sql: str, max_bytes_billed: int) -> dict[str, Any]:
         job_config = self._bigquery.QueryJobConfig(
             maximum_bytes_billed=max_bytes_billed,
             use_legacy_sql=False,
         )
-        rows = list(self._client.query(plan.sql, job_config=job_config).result())
+        rows = list(self._client.query(sql, job_config=job_config).result())
         return dict(rows[0]) if rows else {}
+
+    def run_profile(self, plan: ProfileQueryPlan, max_bytes_billed: int) -> dict[str, Any]:
+        return self._query_single_row(plan.sql, max_bytes_billed)
+
+    def run_formula(self, plan, max_bytes_billed: int) -> dict[str, Any]:
+        return self._query_single_row(plan.sql, max_bytes_billed)
 
 
 @dataclass

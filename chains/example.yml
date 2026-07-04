@@ -117,6 +117,21 @@ bigquery_verification:
     include_null_counts: true
     include_distinct_counts: true
     include_min_max: true
+  # Deterministic formula checks (run with mode: formula_check). Expressions
+  # are arithmetic over column names only — SQL statements are rejected.
+  formula_checks:
+    enabled: true
+    date_window_days: 90
+    tolerance:
+      absolute: 0.01
+      relative: 0.0001
+    checks:
+      - name: example_total_value_formula
+        table: example-project.analytics.example_daily_snapshot
+        expression: total_value
+        expected_expression: quantity * price
+        tolerance_absolute: 0.01
+        date_column: snapshot_date
   store_results:
     okf_pages: summary_only
     run_metadata: detailed

@@ -83,8 +83,8 @@ clear error. A missing individual table follows the same rule.
 ## BigQuery verification (`verify-bq`)
 
 Controlled by the `bigquery_verification` block in the chain config (see
-`chains/example.yml`). Phase 1 implements `schema_only` and `profile`;
-`formula_check` / `full_verification` fail with a clear "not implemented".
+`chains/example.yml`). Phases 1–2 implement `schema_only`, `profile`, and
+`formula_check`; `full_verification` fails with a clear "not implemented".
 
 ```bash
 # Mocked run (schemas + profile results from the fixture file's
@@ -116,6 +116,39 @@ Per-table expectations live under `bigquery_verification.tables`:
 `expect_columns` (existence-checked in both modes), `date_column`,
 `dimension_columns`, `numeric_columns`, `null_columns` (profiling column
 selection; anything unset is detected from the loaded schema).
+
+### Formula checks (`mode: formula_check`)
+
+Explicitly configured, deterministic formula checks — never LLM-generated,
+never natural-language-to-SQL. Expressions are validated at config load to
+be arithmetic over column names (SQL keywords, `;`, and comment tokens are
+rejected). Each check renders one fixed query:
+
+```sql
+SELECT
+  COUNT(*) AS checked_rows,
+  COUNTIF(ABS((total_pnl) - (realized_pnl + unrealized_mtm + hedge_pnl)) > 0.01) AS mismatch_rows
+FROM `<table>`
+WHERE `snapshot_date` >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+```
+
+Tolerance follows the numpy `isclose` convention (`atol + rtol * ABS(expected)`);
+per-check `tolerance_absolute`/`tolerance_relative` override the block-level
+`tolerance` defaults. Results classify deterministically:
+
+- **Matches** — rows were checked, none mismatched.
+- **Source stale** — every checked row mismatches: the implementation is
+  consistent but disagrees with the documented formula (docs look outdated).
+- **Genuine conflict** — partial mismatches; owner review required.
+- **Missing evidence** — table or referenced columns missing, or no rows in
+  the window (no query is run when schema evidence is missing).
+
+Checked/mismatch counts go to `.lineage-wiki/runs/` only. Output pages get
+the conclusion line under `## Verification Status`; Source stale / Genuine
+conflict results are also written to the framework page's
+`## Known Doc-vs-Code Divergences` section. Any non-Matches classification
+makes `verify-bq` exit 1. Mocked results come from the fixture file's
+`formula_checks:` section (keyed by check name).
 
 Unit tests use mocked responses only. A real-BigQuery smoke test is
 integration-only: `LINEAGE_WIKI_BQ_INTEGRATION=1 uv run pytest -m bq_integration`
@@ -162,6 +195,7 @@ lineage_wiki/
     code_indexer.py deterministic symbol location (def/class/assignment)
     fingerprints.py source fingerprints for the manifest
     bq_profiler.py  safe aggregate profiling (query templates + clients)
+    bq_formula_verifier.py deterministic formula checks + classification
 chains/example.yml  example chain config
 tests/              unit + snapshot tests
 ```

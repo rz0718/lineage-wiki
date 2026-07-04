@@ -199,11 +199,13 @@ def verify_bq(
     ],
     root: RootOpt = Path("."),
 ) -> None:
-    """Verify configured BigQuery tables (schema_only or profile mode).
+    """Verify configured BigQuery tables (schema_only, profile, or
+    formula_check mode).
 
-    Schema metadata checks plus, in profile mode, safe aggregate queries
-    (never SELECT *; always capped by max_bytes_billed). Detailed results go
-    to .lineage-wiki/runs/; OKF pages get summary conclusions only.
+    Schema metadata checks plus, per mode, safe aggregate profiling or
+    deterministic formula checks (never SELECT *; always capped by
+    max_bytes_billed). Detailed results go to .lineage-wiki/runs/; OKF pages
+    get summary conclusions only.
     """
     cfg = _load_config_or_exit(config)
     try:
@@ -221,8 +223,15 @@ def verify_bq(
         typer.secho(f"{status:<9} {tv.table}", fg=color)
         for line in tv.conclusions:
             typer.echo(f"  - {line}")
+    for fr in result.formula_checks:
+        status = "ok" if fr.ok else "FAIL"
+        color = typer.colors.GREEN if fr.ok else typer.colors.RED
+        typer.secho(
+            f"{status:<9} formula {fr.check.name} — {fr.classification}", fg=color
+        )
+        typer.echo(f"  - {fr.conclusion()}")
     for rel in result.pages_updated:
-        typer.echo(f"page      {rel} (Verification Status updated)")
+        typer.echo(f"page      {rel} (verification sections updated)")
     for rel in result.pages_skipped:
         typer.secho(f"skipped   {rel}", fg=typer.colors.YELLOW)
     typer.echo(f"run       {result.run_file}")
