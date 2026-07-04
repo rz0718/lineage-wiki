@@ -33,10 +33,12 @@ class PageDraft:
 
 @dataclass
 class ChainPlan:
-    """All non-index pages planned for one chain, plus the gap register."""
+    """All non-index pages planned for one chain, plus the gap register and
+    the evidence bundle the plan was built from."""
 
     pages: list[PageDraft]
     gaps: list[str]
+    bundle: EvidenceBundle = field(default_factory=EvidenceBundle)
 
 
 # --- Planning context -----------------------------------------------------------
@@ -1073,7 +1075,7 @@ def plan_chain_pages(cfg: ChainConfig, root: Path, now: str) -> ChainPlan:
     pages.append(PageDraft(f"{okf}/{ctx.change_check_rel}", render_change_check_page(ctx)))
     for metric, rel in ctx.metrics:
         pages.append(PageDraft(f"{okf}/{rel}", render_metric_page(ctx, metric, rel)))
-    return ChainPlan(pages=pages, gaps=list(ctx.gaps))
+    return ChainPlan(pages=pages, gaps=list(ctx.gaps), bundle=ctx.evidence)
 
 
 def build_context(cfg: ChainConfig, root: Path, now: str) -> _Ctx:

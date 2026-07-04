@@ -10,6 +10,8 @@ tags:
 timestamp: 2026-07-03T00:00:00Z
 ---
 
+<!-- generated-by: lineage-wiki -->
+
 # OKF Change Checks
 
 Change check pages tell an agent what to inspect when code, outputs, reports, or reference documents change: read the diff, resolve the changed symbol through `code-links/`, and land on the affected page.

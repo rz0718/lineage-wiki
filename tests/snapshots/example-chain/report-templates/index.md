@@ -10,6 +10,8 @@ tags:
 timestamp: 2026-07-03T00:00:00Z
 ---
 
+<!-- generated-by: lineage-wiki -->
+
 # OKF Report Templates
 
 Report template pages answer "Where does the user see the number, and how should it be interpreted?" Each page documents line items, source columns, and known caveats.

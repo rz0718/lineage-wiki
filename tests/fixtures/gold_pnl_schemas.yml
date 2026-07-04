@@ -1,0 +1,123 @@
+# Mocked BigQuery schemas for the Gold PnL chain — credential-free demo:
+#
+#   LINEAGE_WIKI_BQ_FIXTURES=tests/fixtures/gold_pnl_schemas.yml \
+#     uv run lineage-wiki generate --config chains/gold-pnl.yml \
+#     --target-repo ../llm-wiki-dataproducts --dry-run
+#
+# Schema metadata and aggregate counts only — never row-level data.
+tables:
+  bem---beli-emas-murni.treasury_da.gold_pnl_daily_snapshot:
+    table_type: TABLE
+    description: Gold PnL daily snapshot — one row per Jakarta calendar day.
+    columns:
+      - name: date
+        type: DATE
+        mode: REQUIRED
+        description: Jakarta calendar date.
+      - name: lp_bid_eod
+        type: FLOAT
+        description: Last LP bid price before midnight WIB.
+      - name: asset_g
+        type: FLOAT
+        description: Physical gold asset held (grams).
+      - name: inventory_g
+        type: FLOAT
+        description: Excess inventory grams after netting user liability.
+      - name: liability_g
+        type: FLOAT
+        description: asset_g - inventory_g.
+      - name: wac
+        type: FLOAT
+        description: Weighted average cost per gram at EOD.
+      - name: spot_unrealized_idr
+        type: FLOAT
+      - name: spot_unrealized_change_idr
+        type: FLOAT
+      - name: spot_realized_user_buy_idr
+        type: FLOAT
+      - name: spot_realized_short_cover_idr
+        type: FLOAT
+      - name: spot_realized_withdrawal_gold_idr
+        type: FLOAT
+      - name: spot_realized_withdrawal_fee_idr
+        type: FLOAT
+      - name: spot_realized_dormant_fee_idr
+        type: FLOAT
+      - name: spot_realized_loan_interest_idr
+        type: FLOAT
+      - name: spot_realized_rebalance_sell_idr
+        type: FLOAT
+      - name: spot_realized_idr
+        type: FLOAT
+      - name: spot_user_transaction_fee_idr
+        type: FLOAT
+      - name: spot_daily_total_idr
+        type: FLOAT
+      - name: fut_unrealized_eod_usd
+        type: FLOAT
+      - name: fut_unrealized_change_usd
+        type: FLOAT
+      - name: fut_realized_usd
+        type: FLOAT
+      - name: fut_daily_total_usd
+        type: FLOAT
+  bem---beli-emas-murni.treasury_da.gold_spread_revenue_spread_cost:
+    table_type: TABLE
+    description: Daily GTV and spread revenue breakdown for gold.
+    columns:
+      - name: date
+        type: DATE
+        mode: REQUIRED
+      - name: gold_tx_gtv_idr
+        type: FLOAT
+      - name: gold_tx_spread_revenue_idr
+        type: FLOAT
+      - name: gold_loan_gtv_idr
+        type: FLOAT
+      - name: gold_loan_spread_revenue_idr
+        type: FLOAT
+      - name: gold_loan_spread_revenue_reverse_idr
+        type: FLOAT
+      - name: spread_cost_idr
+        type: FLOAT
+      - name: gold_loan_penalty_revenue_plu
+        type: FLOAT
+      - name: computed_at
+        type: TIMESTAMP
+
+profiles:
+  bem---beli-emas-murni.treasury_da.gold_pnl_daily_snapshot:
+    row_count: 257
+    date:
+      date:
+        min: "2025-10-20"
+        max: "2026-07-03"
+    nulls:
+      wac: 0
+      spot_daily_total_idr: 0
+    min_max:
+      wac:
+        min: 2601000
+        max: 2911000
+      inventory_g:
+        min: -1200
+        max: 5400
+      spot_daily_total_idr:
+        min: -410000000
+        max: 655000000
+  bem---beli-emas-murni.treasury_da.gold_spread_revenue_spread_cost:
+    row_count: 257
+    date:
+      date:
+        min: "2025-10-20"
+        max: "2026-07-03"
+    nulls: {}
+    min_max: {}
+
+formula_checks:
+  gold_daily_total_formula:
+    checked_rows: 90
+    mismatch_rows: 0
+  gold_futures_daily_total_formula:
+    checked_rows: 90
+    mismatch_rows: 0

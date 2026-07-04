@@ -86,14 +86,58 @@ def init(
     )
 
 
+def _print_write_outcome(result, dry_run: bool) -> None:
+    """Shared created/updated/skipped/index reporting for generate runs."""
+    create_label = "create" if dry_run else "created"
+    update_label = "update" if dry_run else "updated"
+    for rel in result.created:
+        typer.echo(f"{create_label:<9} {rel}")
+    for rel in result.updated:
+        typer.echo(f"{update_label:<9} {rel}")
+        if rel in result.diffs:
+            typer.echo(f"          diff: {result.diffs[rel]}")
+    for rel in result.unchanged:
+        typer.echo(f"unchanged {rel}")
+    for rel in result.skipped:
+        typer.secho(
+            f"protected {rel} (exists but is not tool-generated; left untouched)",
+            fg=typer.colors.YELLOW,
+        )
+    for rel in result.indexes_written:
+        typer.echo(f"index     {rel}")
+        if rel in result.diffs:
+            typer.echo(f"          diff: {result.diffs[rel]}")
+    for rel in result.indexes_skipped:
+        typer.secho(
+            f"protected {rel} (existing index is not tool-generated; left untouched)",
+            fg=typer.colors.YELLOW,
+        )
+
+
 @app.command()
 def generate(
     config: Annotated[
         Path, typer.Option("--config", help="Chain YAML config file.")
     ],
     root: RootOpt = Path("."),
+    target_repo: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--target-repo",
+            help="Target OKF repo root (alias for --root; takes precedence).",
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Report what the run would do without writing any file.",
+        ),
+    ] = False,
 ) -> None:
     """Deterministically scaffold one chain's OKF pages, indexes, and manifest."""
+    if target_repo is not None:
+        root = target_repo
     try:
         cfg = load_config(config)
     except ConfigError as exc:
@@ -101,29 +145,40 @@ def generate(
         raise typer.Exit(code=1)
 
     try:
-        result = run_generate(cfg, root)
+        result = run_generate(cfg, root, dry_run=dry_run)
     except (GenerateError, SourceUnavailableError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
-    for rel in result.created:
-        typer.echo(f"created   {rel}")
-    for rel in result.updated:
-        typer.echo(f"updated   {rel}")
-    for rel in result.unchanged:
-        typer.echo(f"unchanged {rel}")
-    for rel in result.skipped:
+    if dry_run:
         typer.secho(
-            f"skipped   {rel} (exists but is not tool-generated; left untouched)",
-            fg=typer.colors.YELLOW,
+            "DRY RUN — no files were written (writes below are what a real "
+            "run would do).",
+            fg=typer.colors.CYAN,
         )
-    for rel in result.indexes_written:
-        typer.echo(f"index     {rel}")
+        typer.echo("evidence:")
+        for line in result.evidence:
+            typer.echo(f"  - {line}")
+
+    _print_write_outcome(result, dry_run)
+
+    would = "would be written" if dry_run else "written"
     typer.echo(
-        f"manifest  {'written' if result.manifest_written else 'unchanged (no-op run)'}"
+        f"manifest  {would if result.manifest_written else 'unchanged (no-op run)'}"
     )
-    typer.echo(f"run       {result.run_file or 'not recorded (no content change)'}")
+    if dry_run:
+        typer.echo("run       not recorded (dry run)")
+    else:
+        typer.echo(f"run       {result.run_file or 'not recorded (no content change)'}")
+
     typer.echo(f"known gaps recorded: {len(result.gaps)}")
+    if dry_run:
+        for gap in result.gaps:
+            typer.echo(f"  - {gap}")
+        typer.echo("bigquery verification:")
+        for line in result.verification:
+            typer.echo(f"  - {line}")
+        typer.echo("validation (as if the run had been applied):")
 
     _print_report(result.report, strict=False)
     if result.report.failed():
@@ -168,19 +223,7 @@ def update(
     for rel, reasons in result.impact.items():
         typer.echo(f"  - {rel}  [{'; '.join(reasons)}]")
 
-    for rel in result.created:
-        typer.echo(f"created   {rel}")
-    for rel in result.updated:
-        typer.echo(f"updated   {rel}")
-    for rel in result.unchanged:
-        typer.echo(f"unchanged {rel}")
-    for rel in result.skipped:
-        typer.secho(
-            f"skipped   {rel} (exists but is not tool-generated; left untouched)",
-            fg=typer.colors.YELLOW,
-        )
-    for rel in result.indexes_written:
-        typer.echo(f"index     {rel}")
+    _print_write_outcome(result, dry_run=False)
     typer.echo(
         f"manifest  {'written' if result.manifest_written else 'unchanged'}"
     )

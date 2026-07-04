@@ -138,6 +138,16 @@ PLACEHOLDER_PATTERN = r"\bTODO\b|\bTBD\b|\?{3}"
 # H2 section headings under which placeholder tokens are allowed.
 PLACEHOLDER_ALLOWED_SECTION_PATTERN = r"known gaps|open issues|gap|divergence"
 
+# Marker embedded in tool-rendered index files. An existing index without
+# this marker (and not listed in the manifest's managed_indexes) is treated
+# as hand-written and is never overwritten.
+GENERATED_MARKER = "<!-- generated-by: lineage-wiki -->"
+
+# H2 headings whose existing content survives tool rewrites of an owned
+# page: they are filled by `verify-bq` or reviewed by humans, never by the
+# scaffold templates.
+PRESERVED_SECTIONS = ("Verification Status", "Known Doc-vs-Code Divergences")
+
 # --- init scaffolding ---------------------------------------------------------
 
 MANIFEST_DIR = ".lineage-wiki"

@@ -20,7 +20,7 @@ runs queries — no SELECT statements, no row reads, no live data values.
 Commands:
 
 - `lineage-wiki init` — scaffold config examples, prompt stubs, and the `okf/` structure
-- `lineage-wiki generate --config chains/<chain>.yml` — deterministic OKF scaffold for one chain (pages, all eight indexes, `.lineage-wiki/manifest.yml`, run metadata under `.lineage-wiki/runs/`)
+- `lineage-wiki generate --config chains/<chain>.yml` — deterministic OKF scaffold for one chain (pages, all eight indexes, `.lineage-wiki/manifest.yml`, run metadata under `.lineage-wiki/runs/`). `--target-repo <path>` is an alias for `--root`; `--dry-run` previews the full run (writes, protections, evidence, gaps, verification plan, post-run validation) without writing a single file
 - `lineage-wiki update --config chains/<chain>.yml` — diffs source fingerprints (raw doc hashes, local repo git HEAD + path hashes, BigQuery schema hashes, report/config identity) against the manifest, prints an impact plan, and rewrites only affected tool-owned pages. With no source changes it is a strict no-op: no file writes, no manifest churn, no run metadata. BigQuery schema fingerprints ignore last-modified metadata, so plain data loads never trigger rewrites — only real schema changes do.
 - `lineage-wiki verify-bq --config chains/<chain>.yml` — optional, credentialed BigQuery verification (`bigquery_verification` config block). `schema_only` mode checks that configured tables and expected columns exist and fingerprints/capture partitioning, clustering, and view SQL; `profile` mode adds safe aggregate queries (row count, date coverage, null counts, distinct counts, min/max). Detailed results — including SQL and profiled values — go to `.lineage-wiki/runs/<run-id>.json`; OKF output pages receive only summary conclusions under `## Verification Status`.
 - `lineage-wiki validate` — frontmatter, page types, required sections, relative links, frontmatter refs, placeholder checks, and directory-index/metrics-registry membership. Offline only — never calls BigQuery or an LLM.
@@ -44,6 +44,47 @@ Validate an existing OKF catalog (e.g. the reference repo):
 ```bash
 uv run lineage-wiki validate --root ../llm-wiki-dataproducts
 ```
+
+## Dry-run workflow against an existing OKF repo
+
+`chains/gold-pnl.yml` is a real chain config for the Gold PnL vertical of
+the reference catalog. Preview everything without touching the repo:
+
+```bash
+uv run lineage-wiki generate --config chains/gold-pnl.yml \
+  --target-repo ../llm-wiki-dataproducts --dry-run
+
+# Same, with mocked BigQuery schema evidence (no credentials needed):
+LINEAGE_WIKI_BQ_FIXTURES=tests/fixtures/gold_pnl_schemas.yml \
+  uv run lineage-wiki generate --config chains/gold-pnl.yml \
+  --target-repo ../llm-wiki-dataproducts --dry-run
+```
+
+The dry run prints the pages that would be created or updated (with diff
+summaries), the pages and indexes that are protected, the evidence found
+per source, the Known Gaps, what `verify-bq` would check, and the
+validation status *as if the run had been applied* — computed against a
+temporary shadow copy, so indexes and validation reflect the pending pages.
+Nothing is written: no pages, no indexes, no manifest, no run metadata.
+The real OKF repo is only modified when `--dry-run` is omitted explicitly.
+
+### Overwrite protection
+
+Runs (dry or real) never destroy human work:
+
+- An existing page not recorded in `.lineage-wiki/manifest.yml` as
+  tool-generated is **never overwritten**, under every `overwrite_policy` —
+  `update_existing` only refreshes tool-owned pages, and
+  `fail_if_exists` aborts on any collision.
+- Index files carry a `<!-- generated-by: lineage-wiki -->` marker; an
+  existing index without the marker (and not in the manifest) is
+  hand-written and stays protected. A tool-created page missing from a
+  hand-written index is reported as a warning to fix manually, not an
+  error.
+- With `generation.preserve_manual_sections: true` (default), rewriting a
+  tool-owned page keeps the existing `## Verification Status` and
+  `## Known Doc-vs-Code Divergences` bodies (so `verify-bq` results survive
+  regeneration) and retains any extra `## ` section a human added.
 
 ## BigQuery schema ingestion
 
@@ -178,6 +219,7 @@ lineage_wiki/
     schemas.py      OkfPage model, frontmatter render/parse
     templates.py    deterministic Markdown templates for all page types
     indexes.py      generator for okf/index.md + the 7 directory indexes
+    sections.py     manual-section preservation + page diff summaries
     validator.py    baseline validator (extends the catalog's validate_okf.py)
     verifier.py     verify-bq runner (schema checks + profiling conclusions)
   storage/
@@ -197,6 +239,7 @@ lineage_wiki/
     bq_profiler.py  safe aggregate profiling (query templates + clients)
     bq_formula_verifier.py deterministic formula checks + classification
 chains/example.yml  example chain config
+chains/gold-pnl.yml real Gold PnL chain config for ../llm-wiki-dataproducts
 tests/              unit + snapshot tests
 ```
 

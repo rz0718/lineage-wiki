@@ -12,7 +12,7 @@ import posixpath
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..constants import DIR_TO_TYPE, OKF_SUBDIRS
+from ..constants import DIR_TO_TYPE, GENERATED_MARKER, OKF_SUBDIRS
 from ..util import humanize
 from .schemas import parse_page, render_frontmatter
 from .templates import PageDraft
@@ -114,7 +114,9 @@ def _link_from_dir(src_dir: str, target_rel: str) -> str:
 
 
 def _page_text(fm: dict, body: str) -> str:
-    return render_frontmatter(fm) + "\n" + body.strip() + "\n"
+    # The marker is how later runs recognize an index they own; existing
+    # indexes without it are hand-written and stay protected.
+    return render_frontmatter(fm) + "\n" + GENERATED_MARKER + "\n\n" + body.strip() + "\n"
 
 
 def _grouped_tables(

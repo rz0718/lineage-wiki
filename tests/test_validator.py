@@ -215,10 +215,35 @@ def test_index_membership_error_for_managed_page(tmp_path):
     )
     save_manifest(
         tmp_path,
-        Manifest(chain_id="x", chain_slug="x", generated_files=["okf/metrics/example.md"]),
+        Manifest(
+            chain_id="x",
+            chain_slug="x",
+            generated_files=["okf/metrics/example.md"],
+            managed_indexes=["okf/metrics/index.md"],
+        ),
     )
     report = validate_tree(tmp_path)
     assert any("not listed in the metrics registry" in i.message for i in report.errors)
+
+
+def test_index_membership_warning_when_index_is_hand_written(tmp_path):
+    """A tool-managed page missing from a hand-written index is a human
+    follow-up (the tool never edits protected indexes), not an error."""
+    _write(tmp_path, "okf/metrics/example.md", VALID_METRIC)
+    _write(
+        tmp_path,
+        "okf/metrics/index.md",
+        "---\ntype: Index\ntitle: Registry\n---\n\n# Registry\n\nNothing here.\n",
+    )
+    save_manifest(
+        tmp_path,
+        Manifest(chain_id="x", chain_slug="x", generated_files=["okf/metrics/example.md"]),
+    )
+    report = validate_tree(tmp_path)
+    assert report.errors == []
+    assert any(
+        "add the entry manually" in i.message for i in report.warnings
+    )
 
 
 def test_index_membership_satisfied_by_link(tmp_path):

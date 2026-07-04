@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
+import shutil
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterator
 
 from ..config import ChainConfig
 from ..constants import (
     AGENT_INSTRUCTIONS_BLOCK,
     AGENT_INSTRUCTIONS_MARKER,
+    GENERATED_MARKER,
     MANIFEST_DIR,
     OKF_SUBDIRS,
     PROMPT_STUBS,
 )
 from ..examples import EXAMPLE_CHAIN_YAML
 from ..ingestion.fingerprints import compute_fingerprints
+from ..ingestion.source_loader import EvidenceBundle
 from ..okf.indexes import build_all_indexes
+from ..okf.sections import diff_summary, merge_manual_sections
 from ..okf.templates import ChainPlan, plan_chain_pages
 from ..okf.validator import ValidationReport, validate_tree
 from ..storage.manifest import (
@@ -99,42 +106,85 @@ class WriteOutcome:
     unchanged: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)  # existing, not tool-owned
     indexes_written: list[str] = field(default_factory=list)
+    indexes_skipped: list[str] = field(default_factory=list)  # existing, hand-written
+    diffs: dict[str, str] = field(default_factory=dict)  # rel -> one-line summary
+    pending: dict[str, str] = field(default_factory=dict)  # rel -> new content
 
     def content_changed(self) -> bool:
         return bool(self.created or self.updated or self.indexes_written)
 
 
-def _write_page(root: Path, rel: str, content: str, owned: set[str], out: WriteOutcome) -> None:
+def _write_page(
+    root: Path,
+    rel: str,
+    content: str,
+    owned: set[str],
+    out: WriteOutcome,
+    *,
+    preserve: bool = True,
+    dry_run: bool = False,
+) -> None:
     target = root / rel
     if target.exists():
         if rel not in owned:
             # Never blindly overwrite a page the tool did not generate.
             out.skipped.append(rel)
             return
-        if materially_equal(target.read_text(encoding="utf-8"), content):
+        existing = target.read_text(encoding="utf-8")
+        if preserve:
+            content = merge_manual_sections(existing, content)
+        if materially_equal(existing, content):
             out.unchanged.append(rel)
             return
-        target.write_text(content, encoding="utf-8")
+        out.diffs[rel] = diff_summary(existing, content)
+        out.pending[rel] = content
+        if not dry_run:
+            target.write_text(content, encoding="utf-8")
         out.updated.append(rel)
     else:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        out.pending[rel] = content
+        if not dry_run:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
         out.created.append(rel)
 
 
-def _write_indexes(cfg: ChainConfig, root: Path, now: str, out: WriteOutcome) -> None:
+def _write_indexes(
+    cfg: ChainConfig,
+    root: Path,
+    now: str,
+    out: WriteOutcome,
+    previous: Manifest | None,
+) -> list[str]:
+    """Write tool-owned index files; returns the rels this run owns.
+
+    An existing index is owned only if a previous manifest lists it under
+    ``managed_indexes`` or its content carries the generated-by marker —
+    hand-written indexes are never overwritten.
+    """
+    owned_indexes: list[str] = []
     if not cfg.generation.update_indexes:
-        return
+        return owned_indexes
     okf_name = cfg.generation.output_dir
+    managed = set(previous.managed_indexes) if previous else set()
     for draft in build_all_indexes(root / okf_name, now, okf_name):
         target = root / draft.rel_path
-        if target.exists() and materially_equal(
-            target.read_text(encoding="utf-8"), draft.content
-        ):
-            continue
+        if target.exists():
+            existing = target.read_text(encoding="utf-8")
+            if draft.rel_path not in managed and GENERATED_MARKER not in existing:
+                out.indexes_skipped.append(draft.rel_path)
+                continue
+            owned_indexes.append(draft.rel_path)
+            if materially_equal(existing, draft.content):
+                continue
+            out.diffs[draft.rel_path] = diff_summary(existing, draft.content)
+        else:
+            owned_indexes.append(draft.rel_path)
+        out.pending[draft.rel_path] = draft.content
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(draft.content, encoding="utf-8")
         out.indexes_written.append(draft.rel_path)
+    return owned_indexes
 
 
 def _build_manifest(
@@ -144,17 +194,18 @@ def _build_manifest(
     plan: ChainPlan,
     out: WriteOutcome,
     previous: Manifest | None,
+    owned_indexes: list[str],
+    *,
+    fingerprint_root: Path | None = None,
 ) -> Manifest:
     okf_name = cfg.generation.output_dir
     owned = set(previous.generated_files) if previous else set()
     generated_files = sorted(
         (owned | {d.rel_path for d in plan.pages}) - set(out.skipped)
     )
-    managed_indexes = (
-        [f"{okf_name}/index.md"] + [f"{okf_name}/{sub}/index.md" for sub in OKF_SUBDIRS]
-        if cfg.generation.update_indexes
-        else []
-    )
+    # Only indexes this run actually owns are managed — hand-written indexes
+    # must never enter the manifest, or a later run would overwrite them.
+    managed_indexes = sorted(owned_indexes)
     contents: dict[str, str] = {}
     for rel in generated_files + managed_indexes:
         path = root / rel
@@ -166,7 +217,7 @@ def _build_manifest(
         output_dir=okf_name,
         generated_files=generated_files,
         managed_indexes=managed_indexes,
-        source_fingerprints=compute_fingerprints(cfg, root),
+        source_fingerprints=compute_fingerprints(cfg, fingerprint_root or root),
         last_run_at=now,
         last_content_snapshot=compute_snapshot(contents),
     )
@@ -196,6 +247,112 @@ def _record_run(
     return path.relative_to(root).as_posix()
 
 
+# --- evidence / verification summaries ------------------------------------------
+
+
+def _describe_evidence(cfg: ChainConfig, bundle: EvidenceBundle) -> list[str]:
+    """Human-readable one-liners for every configured evidence source."""
+    lines: list[str] = []
+    for item in bundle.raw_docs:
+        n = item.metadata.get("lines", "?")
+        lines.append(f"raw doc `{item.source_uri}` — loaded ({n} lines)")
+    for path in bundle.missing_raw_docs:
+        lines.append(f"raw doc `{path}` — missing (recorded as a Known Gap)")
+    for load in bundle.repos:
+        if load.available:
+            head = (load.git_head or "no git head")[:12]
+            line = (
+                f"repo `{load.repo.name}` — loaded {len(load.files)} file(s) "
+                f"from local clone @ {head}"
+            )
+            if load.missing_paths:
+                line += f"; {len(load.missing_paths)} configured path(s) missing"
+            lines.append(line)
+        else:
+            where = (
+                f"no local clone at `{load.repo.local_path}`"
+                if load.repo.local_path
+                else "no local_path configured"
+            )
+            lines.append(f"repo `{load.repo.name}` — {where}; unverified reference")
+    bq = bundle.bigquery
+    if bq is not None:
+        if bq.available:
+            line = f"bigquery ({bq.client_kind}) — {len(bq.schemas)} schema(s) ingested"
+            if bq.missing_tables:
+                line += f"; not found: {', '.join(bq.missing_tables)}"
+            lines.append(line)
+        else:
+            n_tables = len(cfg.sources.bigquery.tables) if cfg.sources.bigquery else 0
+            lines.append(
+                f"bigquery — unavailable ({bq.unavailable_reason}); "
+                f"{n_tables} table schema(s) not ingested"
+            )
+    for note in bundle.human_notes:
+        lines.append(f"human note `{note.title}` — included")
+    for report in bundle.reports:
+        mapped = "with source mapping" if report.content else "no source mapping"
+        lines.append(f"report `{report.title}` — {mapped}")
+    return lines
+
+
+def _describe_verification(cfg: ChainConfig, bundle: EvidenceBundle) -> list[str]:
+    """What `verify-bq` would do with this config (generate never queries)."""
+    spec = cfg.bigquery_verification
+    if not spec.enabled:
+        return ["bigquery_verification is disabled — verification skipped"]
+    lines = [
+        f"bigquery_verification enabled (mode: {spec.mode}, "
+        f"max_bytes_billed: {spec.max_bytes_billed})"
+    ]
+    tables = cfg.sources.bigquery.tables if cfg.sources.bigquery else []
+    bq = bundle.bigquery
+    for table in tables:
+        ingested = bool(bq and bq.available and bq.schemas.get(table))
+        state = "schema ingested" if ingested else "schema not ingested"
+        lines.append(f"would verify `{table}` ({state})")
+    if spec.mode == "formula_check" and spec.formula_checks.enabled:
+        for check in spec.formula_checks.checks:
+            lines.append(
+                f"would run formula check `{check.name}` on `{check.table}`"
+            )
+    lines.append(
+        "generate never queries BigQuery — run `lineage-wiki verify-bq` to verify"
+    )
+    return lines
+
+
+# --- dry-run shadow tree ---------------------------------------------------------
+
+
+@contextmanager
+def _shadow_tree(root: Path, okf_name: str, pending: dict[str, str]) -> Iterator[Path]:
+    """A temporary mirror of the target repo with this run's pending page
+    writes applied: the okf/ tree and .lineage-wiki/ are copied, everything
+    else (raw_files/, clones, …) is symlinked so relative links still
+    resolve. Dry runs write only here — never into the real repo."""
+    with tempfile.TemporaryDirectory(prefix="lineage-wiki-dry-run-") as td:
+        shadow = Path(td) / "repo"
+        shadow.mkdir()
+        for entry in root.iterdir():
+            if entry.name in (okf_name, MANIFEST_DIR, ".git"):
+                continue
+            (shadow / entry.name).symlink_to(entry)
+        src_okf = root / okf_name
+        if src_okf.is_dir():
+            shutil.copytree(src_okf, shadow / okf_name)
+        else:
+            (shadow / okf_name).mkdir()
+        src_state = root / MANIFEST_DIR
+        if src_state.is_dir():
+            shutil.copytree(src_state, shadow / MANIFEST_DIR)
+        for rel, content in pending.items():
+            target = shadow / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        yield shadow
+
+
 # --- generate ------------------------------------------------------------------
 
 
@@ -205,15 +362,32 @@ class GenerateResult(WriteOutcome):
     manifest_written: bool = False
     run_file: str | None = None
     report: ValidationReport = field(default_factory=ValidationReport)
+    dry_run: bool = False
+    evidence: list[str] = field(default_factory=list)
+    verification: list[str] = field(default_factory=list)
 
 
-def run_generate(cfg: ChainConfig, root: str | Path, now: str | None = None) -> GenerateResult:
-    """Deterministically scaffold one chain's OKF pages, indexes, and manifest."""
+def run_generate(
+    cfg: ChainConfig,
+    root: str | Path,
+    now: str | None = None,
+    *,
+    dry_run: bool = False,
+) -> GenerateResult:
+    """Deterministically scaffold one chain's OKF pages, indexes, and manifest.
+
+    With ``dry_run=True`` nothing under ``root`` is written: page and index
+    writes are classified against the real tree, then applied to a temporary
+    shadow copy so the reported index contents, manifest decision, and
+    validation status are exactly what a real run would produce.
+    """
     root = Path(root).resolve()
     now = now or now_stamp()
 
     plan = plan_chain_pages(cfg, root, now)
-    result = GenerateResult(gaps=plan.gaps)
+    result = GenerateResult(gaps=plan.gaps, dry_run=dry_run)
+    result.evidence = _describe_evidence(cfg, plan.bundle)
+    result.verification = _describe_verification(cfg, plan.bundle)
 
     previous = load_manifest(root)
     owned = set(previous.generated_files) if previous else set()
@@ -226,11 +400,32 @@ def run_generate(cfg: ChainConfig, root: str | Path, now: str | None = None) -> 
                 "exist: " + ", ".join(collisions)
             )
 
+    preserve = cfg.generation.preserve_manual_sections
     for draft in plan.pages:
-        _write_page(root, draft.rel_path, draft.content, owned, result)
-    _write_indexes(cfg, root, now, result)
+        _write_page(
+            root, draft.rel_path, draft.content, owned, result,
+            preserve=preserve, dry_run=dry_run,
+        )
 
-    manifest = _build_manifest(cfg, root, now, plan, result, previous)
+    if dry_run:
+        # Indexes are rendered from the pages on disk, and validation reads
+        # the tree — both must see this run's pages, so they run against a
+        # shadow copy with the pending writes applied.
+        with _shadow_tree(root, cfg.generation.output_dir, dict(result.pending)) as shadow:
+            owned_indexes = _write_indexes(cfg, shadow, now, result, previous)
+            manifest = _build_manifest(
+                cfg, shadow, now, plan, result, previous, owned_indexes,
+                fingerprint_root=root,
+            )
+            result.manifest_written = previous is None or not (
+                manifests_equal_ignoring_run_time(previous, manifest)
+            )
+            save_manifest(shadow, manifest)
+            result.report = validate_tree(shadow, okf_dir=cfg.generation.output_dir)
+        return result
+
+    owned_indexes = _write_indexes(cfg, root, now, result, previous)
+    manifest = _build_manifest(cfg, root, now, plan, result, previous, owned_indexes)
     if previous is None or not manifests_equal_ignoring_run_time(previous, manifest):
         save_manifest(root, manifest)
         result.manifest_written = True
@@ -289,13 +484,14 @@ def run_update(cfg: ChainConfig, root: str | Path, now: str | None = None) -> Up
     result.impact = dict(impact.sorted_items())
 
     owned = set(previous.generated_files)
+    preserve = cfg.generation.preserve_manual_sections
     for draft in plan.pages:
         if draft.rel_path not in impact.pages:
             continue  # surgical updates: untouched evidence, untouched page
-        _write_page(root, draft.rel_path, draft.content, owned, result)
-    _write_indexes(cfg, root, now, result)
+        _write_page(root, draft.rel_path, draft.content, owned, result, preserve=preserve)
+    owned_indexes = _write_indexes(cfg, root, now, result, previous)
 
-    manifest = _build_manifest(cfg, root, now, plan, result, previous)
+    manifest = _build_manifest(cfg, root, now, plan, result, previous, owned_indexes)
     if not manifests_equal_ignoring_run_time(previous, manifest):
         save_manifest(root, manifest)
         result.manifest_written = True

@@ -80,7 +80,7 @@ def test_generate_preserves_human_created_pages(tmp_path):
     result = runner.invoke(
         app, ["generate", "--config", str(EXAMPLE_CONFIG), "--root", str(tmp_path)]
     )
-    assert "skipped   okf/frameworks/example-chain.md" in result.output
+    assert "protected okf/frameworks/example-chain.md" in result.output
     assert human_page.read_text().startswith("---\ntype: Framework\ntitle: Mine")
 
 

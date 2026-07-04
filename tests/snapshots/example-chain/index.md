@@ -10,6 +10,8 @@ tags:
 timestamp: 2026-07-03T00:00:00Z
 ---
 
+<!-- generated-by: lineage-wiki -->
+
 # OKF Knowledge Bundle
 
 This bundle is the source of truth for data-product methodology used by

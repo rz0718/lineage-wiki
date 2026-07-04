@@ -31,6 +31,7 @@ from urllib.parse import unquote
 
 from ..constants import (
     DIR_TO_TYPE,
+    GENERATED_MARKER,
     PAGE_TYPES,
     PLACEHOLDER_ALLOWED_SECTION_PATTERN,
     PLACEHOLDER_PATTERN,
@@ -185,12 +186,20 @@ def validate_tree(root: str | Path, okf_dir: str = "okf") -> ValidationReport:
 
     # Index membership: every non-index page in a known subdirectory must be
     # linked from that directory's index (metrics/index.md is the registry).
+    managed_indexes = set(manifest.managed_indexes) if manifest else set()
     indexed: dict[str, set[Path]] = {}
+    hand_written_index: dict[str, bool] = {}
     for subdir in DIR_TO_TYPE:
         index_path = okf_root / subdir / "index.md"
         targets: set[Path] = set()
+        hand_written_index[subdir] = False
         if index_path.exists():
-            body = parse_page(index_path.read_text(encoding="utf-8")).body
+            text = index_path.read_text(encoding="utf-8")
+            index_rel = index_path.relative_to(root).as_posix()
+            hand_written_index[subdir] = (
+                index_rel not in managed_indexes and GENERATED_MARKER not in text
+            )
+            body = parse_page(text).body
             for link in LINK_RE.findall(body):
                 if not link.startswith(("http://", "https://")):
                     targets.add((index_path.parent / unquote(link)).resolve())
@@ -203,10 +212,25 @@ def validate_tree(root: str | Path, okf_dir: str = "okf") -> ValidationReport:
             continue
         if path.resolve() not in indexed[parts[0]]:
             rel = path.relative_to(root).as_posix()
-            level = "error" if rel in managed else "warning"
+            # The tool never edits a hand-written index, so a missing listing
+            # there is a human follow-up, not a managed-content error.
+            level = (
+                "error"
+                if rel in managed and not hand_written_index[parts[0]]
+                else "warning"
+            )
             what = "metrics registry" if parts[0] == "metrics" else "directory index"
+            hint = (
+                " — the index is hand-written; add the entry manually"
+                if hand_written_index[parts[0]]
+                else ""
+            )
             report.issues.append(
-                Issue(level, rel, f"not listed in the {what} ({okf_dir}/{parts[0]}/index.md)")
+                Issue(
+                    level,
+                    rel,
+                    f"not listed in the {what} ({okf_dir}/{parts[0]}/index.md){hint}",
+                )
             )
 
     # Link and frontmatter-ref resolution.

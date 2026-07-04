@@ -10,6 +10,8 @@ tags:
 timestamp: 2026-07-03T00:00:00Z
 ---
 
+<!-- generated-by: lineage-wiki -->
+
 # OKF Outputs
 
 Output pages document generated BigQuery tables and views: table identity, grain, columns, component links, and the reports that display them.

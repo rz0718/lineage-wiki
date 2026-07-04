@@ -10,6 +10,8 @@ tags:
 timestamp: 2026-07-03T00:00:00Z
 ---
 
+<!-- generated-by: lineage-wiki -->
+
 # OKF Frameworks
 
 Framework pages document end-to-end computation methodologies. Each framework page carries `implementation_refs` pointing to the code repo and `output_refs` pointing to BigQuery tables, making the chain traceable.

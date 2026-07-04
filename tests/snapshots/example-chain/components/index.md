@@ -10,6 +10,8 @@ tags:
 timestamp: 2026-07-03T00:00:00Z
 ---
 
+<!-- generated-by: lineage-wiki -->
+
 # OKF Components
 
 Component pages answer "How is this component calculated?" and carry a factors table documenting what drives each component and where the code lives.
