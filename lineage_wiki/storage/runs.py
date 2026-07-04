@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -50,18 +51,32 @@ def okf_git_head(root: str | Path) -> str | None:
     return proc.stdout.strip() or None
 
 
-def write_run(root: str | Path, record: RunRecord) -> Path:
-    """Write one run record; run ids are timestamp + command, deduped."""
+def _next_run_path(root: str | Path, updated_at: str, command: str) -> Path:
+    """Run ids are timestamp + command, deduped."""
     directory = runs_dir(root)
     directory.mkdir(parents=True, exist_ok=True)
-    stamp = re.sub(r"[^0-9TZ]", "", record.updatedAt) or "run"
-    base = f"{stamp}-{record.command}"
+    stamp = re.sub(r"[^0-9TZ]", "", updated_at) or "run"
+    base = f"{stamp}-{command}"
     path = directory / f"{base}.json"
     counter = 2
     while path.exists():
         path = directory / f"{base}-{counter}.json"
         counter += 1
+    return path
+
+
+def write_run(root: str | Path, record: RunRecord) -> Path:
+    """Write one generate/update run record."""
+    path = _next_run_path(root, record.updatedAt, record.command)
     path.write_text(record.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def write_json_run(root: str | Path, updated_at: str, command: str, payload: dict) -> Path:
+    """Write a free-form run payload (e.g. detailed verify-bq results —
+    query outputs belong here, never on OKF pages)."""
+    path = _next_run_path(root, updated_at, command)
+    path.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
     return path
 
 

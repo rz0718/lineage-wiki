@@ -105,5 +105,10 @@ def compute_fingerprints(cfg: ChainConfig, root: str | Path) -> SourceFingerprin
         bigquery=bigquery,
         raw_docs={doc.path: fingerprint_raw_doc(root, doc.path) for doc in cfg.sources.raw_docs},
         reports={r.name: _sha_obj(r.model_dump()) for r in cfg.sources.reports},
-        config=_sha_obj(cfg.model_dump(exclude={"model", "validation"})),
+        # bigquery_verification is excluded too: verify-bq settings do not
+        # affect deterministic page output, so tuning them must not register
+        # as a chain-config change.
+        config=_sha_obj(
+            cfg.model_dump(exclude={"model", "validation", "bigquery_verification"})
+        ),
     )

@@ -1,4 +1,4 @@
-"""`lineage-wiki` CLI (Milestone 1: init, generate, validate)."""
+"""`lineage-wiki` CLI: init, generate, update, verify-bq, validate."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from .agent.runner import GenerateError, run_generate, run_init, run_update
 from .config import ChainConfig, ConfigError, load_config
 from .connectors import SourceUnavailableError
 from .okf.validator import ValidationReport, validate_tree
+from .okf.verifier import VerificationError, run_verify_bq
 
 app = typer.Typer(
     name="lineage-wiki",
@@ -189,6 +190,46 @@ def update(
         _print_report(result.report, strict=False)
         if result.report.failed():
             raise typer.Exit(code=1)
+
+
+@app.command("verify-bq")
+def verify_bq(
+    config: Annotated[
+        Path, typer.Option("--config", help="Chain YAML config file.")
+    ],
+    root: RootOpt = Path("."),
+) -> None:
+    """Verify configured BigQuery tables (schema_only or profile mode).
+
+    Schema metadata checks plus, in profile mode, safe aggregate queries
+    (never SELECT *; always capped by max_bytes_billed). Detailed results go
+    to .lineage-wiki/runs/; OKF pages get summary conclusions only.
+    """
+    cfg = _load_config_or_exit(config)
+    try:
+        result = run_verify_bq(cfg, root)
+    except (VerificationError, SourceUnavailableError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    typer.echo(f"mode      {result.mode}")
+    for note in result.notes:
+        typer.secho(f"note      {note}", fg=typer.colors.YELLOW)
+    for tv in result.tables:
+        status = "ok" if tv.ok else "FAIL"
+        color = typer.colors.GREEN if tv.ok else typer.colors.RED
+        typer.secho(f"{status:<9} {tv.table}", fg=color)
+        for line in tv.conclusions:
+            typer.echo(f"  - {line}")
+    for rel in result.pages_updated:
+        typer.echo(f"page      {rel} (Verification Status updated)")
+    for rel in result.pages_skipped:
+        typer.secho(f"skipped   {rel}", fg=typer.colors.YELLOW)
+    typer.echo(f"run       {result.run_file}")
+    if not result.ok:
+        typer.secho("verify-bq FAILED — see issues above.", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+    typer.secho("verify-bq OK.", fg=typer.colors.GREEN)
 
 
 @app.command()

@@ -22,7 +22,8 @@ Commands:
 - `lineage-wiki init` — scaffold config examples, prompt stubs, and the `okf/` structure
 - `lineage-wiki generate --config chains/<chain>.yml` — deterministic OKF scaffold for one chain (pages, all eight indexes, `.lineage-wiki/manifest.yml`, run metadata under `.lineage-wiki/runs/`)
 - `lineage-wiki update --config chains/<chain>.yml` — diffs source fingerprints (raw doc hashes, local repo git HEAD + path hashes, BigQuery schema hashes, report/config identity) against the manifest, prints an impact plan, and rewrites only affected tool-owned pages. With no source changes it is a strict no-op: no file writes, no manifest churn, no run metadata. BigQuery schema fingerprints ignore last-modified metadata, so plain data loads never trigger rewrites — only real schema changes do.
-- `lineage-wiki validate` — frontmatter, page types, required sections, relative links, frontmatter refs, placeholder checks, and directory-index/metrics-registry membership
+- `lineage-wiki verify-bq --config chains/<chain>.yml` — optional, credentialed BigQuery verification (`bigquery_verification` config block). `schema_only` mode checks that configured tables and expected columns exist and fingerprints/capture partitioning, clustering, and view SQL; `profile` mode adds safe aggregate queries (row count, date coverage, null counts, distinct counts, min/max). Detailed results — including SQL and profiled values — go to `.lineage-wiki/runs/<run-id>.json`; OKF output pages receive only summary conclusions under `## Verification Status`.
+- `lineage-wiki validate` — frontmatter, page types, required sections, relative links, frontmatter refs, placeholder checks, and directory-index/metrics-registry membership. Offline only — never calls BigQuery or an LLM.
 
 ## Install
 
@@ -79,6 +80,47 @@ Tables are configured under `sources.bigquery.tables` as
 as Known Gaps and the run succeeds; `required: true` fails the run with a
 clear error. A missing individual table follows the same rule.
 
+## BigQuery verification (`verify-bq`)
+
+Controlled by the `bigquery_verification` block in the chain config (see
+`chains/example.yml`). Phase 1 implements `schema_only` and `profile`;
+`formula_check` / `full_verification` fail with a clear "not implemented".
+
+```bash
+# Mocked run (schemas + profile results from the fixture file's
+# `tables:` and `profiles:` sections — no credentials needed):
+LINEAGE_WIKI_BQ_FIXTURES=tests/fixtures/bigquery_schemas.yml \
+  uv run lineage-wiki verify-bq --config chains/example.yml --root /path/to/wiki-repo
+
+# Real run (after `uv sync --extra bigquery` and
+# `gcloud auth application-default login`):
+uv run lineage-wiki verify-bq --config chains/<chain>.yml --root /path/to/wiki-repo
+```
+
+Safety rules, enforced by construction:
+
+- Profiling queries come from deterministic templates over schema-derived
+  column names — never `SELECT *`, never natural-language SQL.
+- Aggregates only (`COUNT`, `COUNTIF(... IS NULL)`, `APPROX_COUNT_DISTINCT`,
+  `MIN`, `MAX`); no row-level data leaves BigQuery.
+- Every real query sets `maximum_bytes_billed` from `max_bytes_billed`.
+- When a date column is configured, is the partition field, or is detected
+  from the schema, scans are limited to `profiling.date_window_days`.
+- Profiled values (row counts, date bounds, min/max, …) are written to
+  `.lineage-wiki/runs/` only; OKF pages get conclusions like "Rows are
+  present in the profiled window", never live values.
+- Sample rows are never read in phase 1, even if `sample_rows.enabled` is
+  set.
+
+Per-table expectations live under `bigquery_verification.tables`:
+`expect_columns` (existence-checked in both modes), `date_column`,
+`dimension_columns`, `numeric_columns`, `null_columns` (profiling column
+selection; anything unset is detected from the loaded schema).
+
+Unit tests use mocked responses only. A real-BigQuery smoke test is
+integration-only: `LINEAGE_WIKI_BQ_INTEGRATION=1 uv run pytest -m bq_integration`
+(target table via `LINEAGE_WIKI_BQ_INTEGRATION_TABLE`).
+
 ## Tests
 
 ```bash
@@ -104,6 +146,7 @@ lineage_wiki/
     templates.py    deterministic Markdown templates for all page types
     indexes.py      generator for okf/index.md + the 7 directory indexes
     validator.py    baseline validator (extends the catalog's validate_okf.py)
+    verifier.py     verify-bq runner (schema checks + profiling conclusions)
   storage/
     manifest.py     .lineage-wiki/manifest.yml reader/writer
   agent/
@@ -118,6 +161,7 @@ lineage_wiki/
     source_loader.py connectors -> normalized EvidenceBundle
     code_indexer.py deterministic symbol location (def/class/assignment)
     fingerprints.py source fingerprints for the manifest
+    bq_profiler.py  safe aggregate profiling (query templates + clients)
 chains/example.yml  example chain config
 tests/              unit + snapshot tests
 ```

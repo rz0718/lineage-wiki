@@ -88,3 +88,35 @@ validation:
   require_source_citations: true
   fail_on_uncited_formula: true
   fail_on_placeholders_outside_known_gaps: true
+
+# Optional, credentialed verification run by `lineage-wiki verify-bq`.
+# Phase 1 supports schema_only and profile. Profile mode runs safe
+# aggregate queries only (never SELECT *; always capped by
+# max_bytes_billed); detailed results go to .lineage-wiki/runs/ and OKF
+# pages receive summary conclusions only.
+bigquery_verification:
+  enabled: true
+  mode: profile # schema_only | profile (formula_check lands in a later milestone)
+  max_bytes_billed: 1000000000
+  tables:
+    - table: example-project.analytics.example_daily_snapshot
+      expect_columns:
+        - snapshot_date
+        - asset_id
+        - total_value
+      date_column: snapshot_date
+      dimension_columns:
+        - asset_id
+      numeric_columns:
+        - quantity
+        - price
+  profiling:
+    enabled: true
+    date_window_days: 90
+    include_row_count: true
+    include_null_counts: true
+    include_distinct_counts: true
+    include_min_max: true
+  store_results:
+    okf_pages: summary_only
+    run_metadata: detailed

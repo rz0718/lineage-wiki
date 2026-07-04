@@ -44,3 +44,26 @@ tables:
         type: DATE
       - name: total_value
         type: NUMERIC
+
+# Mocked aggregate-profiling results for verify-bq (profile mode), keyed by
+# fully qualified table name. Aggregate stats only — never row-level data.
+profiles:
+  example-project.analytics.example_daily_snapshot:
+    row_count: 187
+    date:
+      snapshot_date:
+        min: "2026-04-05"
+        max: "2026-07-03"
+    nulls:
+      quantity: 0
+      price: 2
+      total_value: 0
+    distinct:
+      asset_id: 3
+    min_max:
+      quantity:
+        min: 0
+        max: 250
+      price:
+        min: 900000
+        max: 1250000

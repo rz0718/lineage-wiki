@@ -30,3 +30,6 @@ packages = ["lineage_wiki"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "bq_integration: requires real BigQuery credentials; opt in with LINEAGE_WIKI_BQ_INTEGRATION=1",
+]
