@@ -18,6 +18,9 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+bigquery = [
+    "google-cloud-bigquery>=3.13",
+]
 
 [project.scripts]
 lineage-wiki = "lineage_wiki.cli:app"

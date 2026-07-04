@@ -1,7 +1,8 @@
 """Source-evidence connectors.
 
-Milestone 4 ships the local connectors (raw docs, local repo clones).
-BigQuery, remote GitHub, and report connectors land in later milestones.
+Milestone 4 ships the local connectors (raw docs, local repo clones);
+Milestone 5 adds the schema-only BigQuery connector. Remote GitHub and
+report connectors land in later milestones.
 """
 
 

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..config import ChainConfig
+from ..connectors.bigquery_connector import BigQueryLoadResult, load_bigquery_schemas
 from ..connectors.local_repo_connector import RepoLoadResult, load_local_repo
 from ..connectors.raw_doc_connector import load_raw_docs
 from ..util import slugify
@@ -20,6 +21,7 @@ class EvidenceBundle:
     raw_docs: list[EvidenceItem] = field(default_factory=list)
     missing_raw_docs: list[str] = field(default_factory=list)
     repos: list[RepoLoadResult] = field(default_factory=list)
+    bigquery: BigQueryLoadResult | None = None
     human_notes: list[EvidenceItem] = field(default_factory=list)
     reports: list[EvidenceItem] = field(default_factory=list)
 
@@ -30,6 +32,8 @@ class EvidenceBundle:
         items = list(self.raw_docs)
         for repo in self.repos:
             items.extend(repo.files)
+        if self.bigquery is not None:
+            items.extend(self.bigquery.items)
         items.extend(self.human_notes)
         items.extend(self.reports)
         return items
@@ -42,6 +46,8 @@ def load_sources(cfg: ChainConfig, root: str | Path) -> EvidenceBundle:
     raw = load_raw_docs(cfg.sources.raw_docs, root)
     bundle = EvidenceBundle(raw_docs=raw.items, missing_raw_docs=raw.missing)
     bundle.repos = [load_local_repo(repo, root) for repo in cfg.sources.repos]
+    if cfg.sources.bigquery and cfg.sources.bigquery.tables:
+        bundle.bigquery = load_bigquery_schemas(cfg.sources.bigquery)
 
     for note in cfg.sources.human_notes:
         bundle.human_notes.append(

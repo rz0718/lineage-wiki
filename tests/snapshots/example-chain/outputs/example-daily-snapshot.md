@@ -26,9 +26,7 @@ report_refs:
 
 ## Grain
 
-Not yet documented — the table grain will be recorded once BigQuery schema
-evidence is ingested (tracked in the framework page's
-[Known Gaps](../frameworks/example-chain.md#known-gaps)).
+Not yet documented — the table grain will be recorded once BigQuery schema evidence is ingested (tracked in the framework page's [Known Gaps](../frameworks/example-chain.md#known-gaps)).
 
 ## Column Definitions
 
@@ -50,8 +48,7 @@ evidence is ingested.
 
 ## Verification Status
 
-Unverified scaffold output page generated deterministically by `lineage-wiki` from the chain config and locally loaded evidence. No fact on this page has been cross-checked against that evidence yet. The table identity comes from the chain
-config; nothing else has been verified.
+Unverified scaffold output page generated deterministically by `lineage-wiki` from the chain config and locally loaded evidence. No fact on this page has been cross-checked against that evidence yet. The table identity comes from the chain config; nothing else has been verified.
 
 ## Implementation
 

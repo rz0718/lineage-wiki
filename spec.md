@@ -145,6 +145,7 @@ lineage-wiki generate --config chains/gold-pnl.yml
 lineage-wiki update --config chains/gold-pnl.yml
 lineage-wiki validate
 lineage-wiki inspect --chain gold-pnl
+lineage-wiki verify-bq --config chains/gold-pnl.yml
 lineage-wiki configure
 ```
 
@@ -292,6 +293,35 @@ validation:
   require_source_citations: true
   fail_on_uncited_formula: true
   fail_on_placeholders_outside_known_gaps: true
+
+bigquery_verification:
+  enabled: false
+  mode: schema_only # schema_only | profile | formula_check | full_verification
+  max_bytes_billed: 1000000000
+
+  sample_rows:
+    enabled: false
+    max_rows: 20
+
+  profiling:
+    enabled: false
+    date_window_days: 90
+    include_row_count: true
+    include_null_counts: true
+    include_distinct_counts: true
+    include_min_max: true
+
+  formula_checks:
+    enabled: false
+    date_window_days: 90
+    tolerance:
+      absolute: 0.01
+      relative: 0.0001
+    checks: []
+
+  store_results:
+    okf_pages: summary_only
+    run_metadata: detailed
 ```
 
 ### Source Behavior
@@ -669,6 +699,8 @@ lineage_wiki/
     source_loader.py
     code_indexer.py
     bq_schema_loader.py
+    bq_profiler.py
+    bq_formula_verifier.py
     doc_chunker.py
     git_context.py
   agent/
@@ -684,6 +716,7 @@ lineage_wiki/
     graph.py
     indexes.py
     validator.py
+    verifier.py
   storage/
     repo_writer.py
     manifest.py
@@ -979,6 +1012,35 @@ The current catalog already has `scripts/validate_okf.py`, which checks
 frontmatter and relative Markdown links. The MVP can vendor, wrap, or extend
 that behavior rather than replacing it.
 
+### `lineage-wiki verify-bq --config chains/gold-pnl.yml`
+
+Runs optional BigQuery verification for configured tables and formulas. This
+command is separate from offline OKF validation because it may require
+credentials and may incur BigQuery cost.
+
+Supported modes:
+
+```text
+schema_only       # metadata, columns, types, partitioning, clustering, view SQL
+profile           # safe aggregate profiling queries
+formula_check     # deterministic formula verification queries
+full_verification # schema + profile + formula checks + SQL lineage where available
+```
+
+The command should:
+
+1. Respect `bigquery_verification.enabled` and `mode`.
+2. Use `max_bytes_billed` on every query.
+3. Avoid `SELECT *` by default.
+4. Require explicit config before reading sample rows.
+5. Prefer aggregate queries and recent partition windows.
+6. Store detailed query results only in `.lineage-wiki/runs/`.
+7. Write only verification conclusions, Known Gaps, and Known Doc-vs-Code
+   Divergences into OKF pages.
+8. Fail clearly when BigQuery credentials are required but unavailable.
+9. Record optional missing BigQuery evidence as a Known Gap rather than
+   failing the whole run.
+
 ### `lineage-wiki inspect --chain gold-pnl`
 
 Prints a lineage summary:
@@ -1001,7 +1063,190 @@ manifest.
 
 ---
 
-## 11. Prompting And Run Discipline
+
+## 11. BigQuery Verification And OKF Markdown Validation
+
+Lineage Wiki supports two distinct verification layers:
+
+1. **OKF Markdown validation** — offline validation of the Markdown knowledge
+   graph. This is always available and must not call BigQuery or an LLM.
+2. **BigQuery verification** — optional, credentialed verification of BigQuery
+   schemas, profiling signals, formulas, and SQL lineage. This is controlled by
+   config and may incur query cost.
+
+These layers should remain separate in the implementation. `lineage-wiki
+validate` checks OKF structure. `lineage-wiki verify-bq` checks BigQuery
+evidence. Generate/update runs may call BigQuery verification only when the
+config enables it.
+
+### OKF Markdown Validation
+
+Markdown validation checks whether the OKF catalog is structurally valid and
+agent-readable. It should verify:
+
+- YAML frontmatter exists on every non-index OKF page.
+- Frontmatter `type` uses the expected title-cased labels.
+- Required sections exist for each page type.
+- Relative Markdown links resolve.
+- Frontmatter reference paths resolve.
+- Generated non-index pages appear in the relevant directory indexes.
+- Reusable terms are registered in `okf/metrics/index.md`.
+- Formula sections include evidence links, source references, code links, or an
+  explicit verification status.
+- Placeholders such as `TODO`, `TBD`, `<path-TBD>`, and `???` appear only under
+  Known Gaps or equivalent open-issue sections.
+
+This layer never checks live data values. It validates the knowledge graph.
+
+### BigQuery Verification Modes
+
+BigQuery verification checks whether OKF claims are consistent with BigQuery
+metadata and safe query results. It must not dump live metrics or row-level data
+into OKF pages.
+
+Supported modes:
+
+#### `schema_only`
+
+Default mode. Reads BigQuery metadata only:
+
+- fully qualified table names
+- columns and types
+- column descriptions
+- partitioning and clustering
+- table or view metadata
+- view SQL, when available
+- last modified metadata
+
+This mode can verify that referenced tables and columns exist, but it cannot
+prove formula behavior.
+
+#### `profile`
+
+Runs safe aggregate profiling queries to understand table shape and likely
+grain:
+
+- row count
+- date coverage
+- partition coverage
+- null counts
+- distinct counts for configured key dimensions
+- min/max for selected numeric or date columns
+
+Profiling must avoid `SELECT *`, use `max_bytes_billed`, and limit scans with
+partition/date filters when possible.
+
+#### `formula_check`
+
+Runs deterministic formula verification queries derived from configured or
+documented formulas.
+
+Example check:
+
+```sql
+SELECT
+  COUNT(*) AS checked_rows,
+  COUNTIF(ABS(total_pnl - (realized_pnl + unrealized_mtm + hedge_pnl)) > 0.01)
+    AS mismatch_rows
+FROM `<table>`
+WHERE snapshot_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+```
+
+Formula checks classify results as:
+
+- `Matches` — BigQuery behavior supports the documented claim.
+- `Source stale` — source docs are outdated, but implementation behavior is
+  clear.
+- `Genuine conflict` — docs, code, BigQuery, or report mapping disagree and
+  need owner review.
+- `Missing evidence` — not enough evidence exists to verify the claim.
+
+#### `full_verification`
+
+Combines schema checks, profiling, formula checks, SQL lineage parsing, and
+optional sample rows. This mode must be explicitly enabled.
+
+### BigQuery Verification Config
+
+```yaml
+bigquery_verification:
+  enabled: true
+  mode: schema_only # schema_only | profile | formula_check | full_verification
+  max_bytes_billed: 1000000000
+
+  sample_rows:
+    enabled: false
+    max_rows: 20
+
+  profiling:
+    enabled: true
+    date_window_days: 90
+    include_row_count: true
+    include_null_counts: true
+    include_distinct_counts: true
+    include_min_max: true
+
+  formula_checks:
+    enabled: true
+    date_window_days: 90
+    tolerance:
+      absolute: 0.01
+      relative: 0.0001
+    checks:
+      - name: total_pnl_formula
+        table: bem---beli-emas-murni.treasury_da.gold_pnl_daily_snapshot
+        expression: total_pnl
+        expected_expression: realized_pnl + unrealized_mtm + hedge_pnl
+        date_column: snapshot_date
+        tolerance_absolute: 0.01
+
+  store_results:
+    okf_pages: summary_only
+    run_metadata: detailed
+```
+
+### BigQuery Safety Rules
+
+1. Default to `schema_only`.
+2. Never run `SELECT *` by default.
+3. Never store row-level data in OKF pages.
+4. Require explicit config for sample rows.
+5. Always set `max_bytes_billed`.
+6. Prefer aggregate queries.
+7. Limit verification to recent partition windows when possible.
+8. Redact or skip PII-like columns.
+9. Store detailed query outputs only in `.lineage-wiki/runs/`.
+10. Store only verification conclusions, Known Gaps, and divergences in OKF
+    pages.
+11. Do not implement arbitrary natural-language SQL generation in the MVP.
+12. Generated queries must come from deterministic templates or explicitly
+    configured formula checks.
+
+### OKF Output Behavior
+
+`Output`, `Framework`, and `Report Template` pages should summarize BigQuery
+verification under `## Verification Status`.
+
+Example:
+
+```markdown
+## Verification Status
+
+Verified from BigQuery schema and aggregate profiling.
+
+- Required columns are present.
+- Table grain appears to be daily by `snapshot_date`.
+- Formula check for `total_pnl = realized_pnl + unrealized_mtm + hedge_pnl`
+  passed within configured tolerance.
+- Detailed verification result is stored in `.lineage-wiki/runs/<run-id>.json`.
+```
+
+If verification contradicts raw documentation or report behavior, write the
+issue to `## Known Doc-vs-Code Divergences` or the relevant change-check page.
+
+Detailed query results belong in run metadata, not permanent OKF pages.
+
+## 12. Prompting And Run Discipline
 
 Borrow these OpenWiki-style prompt rules and adapt them to OKF:
 
@@ -1026,7 +1271,7 @@ completes.
 
 ---
 
-## 12. Validation Requirements
+## 13. Validation Requirements
 
 Validation should fail if:
 
@@ -1049,9 +1294,13 @@ Validation should fail if:
 Validation should warn, not fail, if optional evidence is unavailable and the
 page records a clear Known Gap.
 
+`lineage-wiki validate` must remain offline and should not call BigQuery.
+BigQuery-specific checks belong to `lineage-wiki verify-bq` or to
+generate/update runs only when `bigquery_verification.enabled` is true.
+
 ---
 
-## 13. Tests
+## 14. Tests
 
 MVP tests should cover:
 
@@ -1060,6 +1309,9 @@ MVP tests should cover:
 - raw doc loading
 - local repo file loading
 - BigQuery schema parsing from mocked schema output
+- BigQuery profiling query construction
+- BigQuery formula-check query construction
+- BigQuery verification result classification
 - OKF template rendering
 - required section validation
 - frontmatter reference validation
@@ -1077,7 +1329,7 @@ required for normal unit test runs.
 
 ---
 
-## 14. Acceptance Criteria
+## 15. Acceptance Criteria
 
 The MVP is complete when:
 
@@ -1097,12 +1349,15 @@ The MVP is complete when:
   affected pages and indexes.
 9. `lineage-wiki inspect --chain <chain>` prints the OKF graph, gaps,
   divergences, and last run status without calling an LLM.
-10. Tests cover config loading, template rendering, validation, index updates,
+10. `lineage-wiki verify-bq --config <chain>` supports schema-only mode and can
+  run mocked profile/formula verification in tests without storing row-level
+  data in OKF pages.
+11. Tests cover config loading, template rendering, validation, index updates,
   manifest diffing, and update impact behavior.
 
 ---
 
-## 15. Recommended Build Order
+## 16. Recommended Build Order
 
 Start with a deterministic MVP. Do **not** build the autonomous LLM agent
 first.
@@ -1114,7 +1369,10 @@ Milestone 1: CLI + config + deterministic OKF templates + validator
 Milestone 2: index generation + metrics registry updates
 Milestone 3: manifest + source fingerprinting + no-op update detection
 Milestone 4: local raw docs + local repo ingestion
-Milestone 5: BigQuery schema ingestion
+Milestone 5A: BigQuery schema ingestion
+Milestone 5B: BigQuery safe profiling
+Milestone 5C: deterministic formula verification queries
+Milestone 5D: SQL lineage parsing
 Milestone 6: deterministic OKF skeleton generation for one vertical
 Milestone 7: LLM extraction/writing behind an interface
 Milestone 8: update mode using manifest diffs and git context
@@ -1129,7 +1387,7 @@ OpenAI, Anthropic, Gemini, local models, or a deterministic/manual mode later.
 
 ---
 
-## 16. Goal Prompt For Coding Agent
+## 17. Goal Prompt For Coding Agent
 
 Paste this as the main instruction to a coding agent.
 
@@ -1190,6 +1448,7 @@ lineage-wiki generate --config chains/<chain>.yml
 lineage-wiki update --config chains/<chain>.yml
 lineage-wiki validate
 lineage-wiki inspect --chain <chain>
+lineage-wiki verify-bq --config chains/<chain>.yml
 ```
 
 # Required implementation
@@ -1234,7 +1493,9 @@ baseline validator and extend it where needed.
 7. Validate links, frontmatter references, required sections, unresolved
   placeholders, and index membership.
 8. Keep deterministic scaffolding working without an LLM.
-9. Add LLM extraction/writing behind an interface after the deterministic
+9. Keep `lineage-wiki validate` offline; use `lineage-wiki verify-bq` for optional BigQuery verification.
+10. BigQuery verification must default to schema-only, avoid `SELECT *`, set `max_bytes_billed`, and store detailed query results only in run metadata.
+11. Add LLM extraction/writing behind an interface after the deterministic
   contracts are stable.
 
 # Build order
@@ -1258,7 +1519,7 @@ Add source ingestion and LLM extraction only after those contracts pass tests.
 
 ---
 
-## 17. One-Line Positioning
+## 18. One-Line Positioning
 
 **OpenWiki for data products: a Python CLI agent that turns BigQuery schemas,
 source code, raw methodology, and dashboard/report mappings into a

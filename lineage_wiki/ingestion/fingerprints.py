@@ -9,8 +9,11 @@ source change since the last run?"
   over the configured paths' contents. Remote-only repos fingerprint their
   config identity; content-level fingerprints for them land with the GitHub
   connector milestone.
-- bigquery: hash of the configured table identity. Schema-level fingerprints
-  land with the BigQuery connector milestone.
+- bigquery: hash of the loaded table schema (columns, types, partitioning,
+  clustering, view SQL — everything except volatile last-modified metadata).
+  When BigQuery is unavailable the fingerprint falls back to the configured
+  table identity, so unavailable runs stay no-op-stable and schemas register
+  as a change the first time they load.
 - reports: hash of the configured report mapping (name/type/url/notes).
 - config: hash of the scaffold-relevant chain config (everything except
   ``model`` and ``validation``, which do not affect deterministic output).
@@ -80,13 +83,23 @@ def fingerprint_repo(root: Path, repo: RepoSource) -> RepoFingerprint:
     return fingerprint
 
 
+def fingerprint_bigquery(source) -> dict[str, str]:
+    # Imported here: the connector imports config/evidence, and connectors
+    # already import this module for sha_bytes/git_head.
+    from ..connectors.bigquery_connector import load_bigquery_schemas
+
+    fingerprints = {table: _sha_obj(f"config:{table}") for table in source.tables}
+    load = load_bigquery_schemas(source, enforce_required=False)
+    for table, schema in load.schemas.items():
+        fingerprints[table] = schema.fingerprint()
+    return fingerprints
+
+
 def compute_fingerprints(cfg: ChainConfig, root: str | Path) -> SourceFingerprints:
     root = Path(root)
     bigquery = {}
-    if cfg.sources.bigquery:
-        bigquery = {
-            table: _sha_obj(f"config:{table}") for table in cfg.sources.bigquery.tables
-        }
+    if cfg.sources.bigquery and cfg.sources.bigquery.tables:
+        bigquery = fingerprint_bigquery(cfg.sources.bigquery)
     return SourceFingerprints(
         repos={repo.name: fingerprint_repo(root, repo) for repo in cfg.sources.repos},
         bigquery=bigquery,

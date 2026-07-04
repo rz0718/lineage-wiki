@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import ChainConfig, MetricInput, RepoSource, ReportSource
+from ..connectors.bigquery_connector import BigQueryLoadResult, TableSchema
 from ..connectors.local_repo_connector import RepoLoadResult
 from ..ingestion.code_indexer import CodeIndex, index_repo
 from ..ingestion.evidence import EvidenceItem
@@ -60,7 +61,13 @@ class _Ctx:
     raw_docs_missing: list[str] = field(default_factory=list)
     repo_loads: dict[str, RepoLoadResult] = field(default_factory=dict)
     code_indexes: dict[str, CodeIndex] = field(default_factory=dict)
+    bq_load: BigQueryLoadResult | None = None
     gaps: list[str] = field(default_factory=list)
+
+    def bq_schema(self, table: str) -> TableSchema | None:
+        if self.bq_load is None or not self.bq_load.available:
+            return None
+        return self.bq_load.schemas.get(table)
 
     def link_from(self, src_dir: str, target_rel: str) -> str:
         """Relative link from a page in okf/<src_dir>/ to another okf page."""
@@ -106,6 +113,7 @@ def _build_ctx(cfg: ChainConfig, root: Path, now: str) -> _Ctx:
     ctx.raw_docs_missing = bundle.missing_raw_docs
     ctx.repo_loads = {load.repo.name: load for load in bundle.repos}
     ctx.code_indexes = {load.repo.name: index_repo(load) for load in bundle.repos}
+    ctx.bq_load = bundle.bigquery
 
     # Deterministic gap register — one entry per fact the scaffold cannot know.
     gaps = ctx.gaps
@@ -145,11 +153,29 @@ def _build_ctx(cfg: ChainConfig, root: Path, now: str) -> _Ctx:
             f"Code loaded from repo `{repo.name}` has not been cross-checked "
             "against the methodology (cross-checking lands in a later milestone)."
         )
-    for table, _, _ in ctx.outputs:
+    if ctx.outputs and ctx.bq_load is not None and not ctx.bq_load.available:
         gaps.append(
-            f"BigQuery schema for `{table}` has not been ingested; grain and "
-            "column definitions are undocumented."
+            f"BigQuery is unavailable ({ctx.bq_load.unavailable_reason}); "
+            "configured table schemas cannot be ingested."
         )
+    for table, _, _ in ctx.outputs:
+        schema = ctx.bq_schema(table)
+        if schema is not None:
+            gaps.append(
+                f"Schema for `{table}` is ingested but has not been "
+                "cross-checked against code or methodology (verification "
+                "lands in a later milestone)."
+            )
+        elif ctx.bq_load is not None and ctx.bq_load.available:
+            gaps.append(
+                f"BigQuery table `{table}` was not found at generate time; "
+                "grain and column definitions are undocumented."
+            )
+        else:
+            gaps.append(
+                f"BigQuery schema for `{table}` has not been ingested; grain and "
+                "column definitions are undocumented."
+            )
     for report, _, _ in ctx.reports:
         if not report.source_mapping_notes:
             gaps.append(f"Report `{report.name}` has no verified source mapping.")
@@ -315,6 +341,15 @@ def render_framework_page(ctx: _Ctx) -> str:
         code_status = "Not loaded — no local clone available"
     else:
         code_status = "Not ingested (scaffold)"
+    if ctx.bq_load is not None and ctx.bq_load.available:
+        bq_status = (
+            f"Ingested — {len(ctx.bq_load.schemas)} of {len(ctx.outputs)} "
+            f"schema(s) loaded ({ctx.bq_load.client_kind}); cross-check pending"
+        )
+    elif ctx.outputs:
+        bq_status = "Not loaded — BigQuery unavailable"
+    else:
+        bq_status = "Not ingested (scaffold)"
 
     body = f"""\
 # {ctx.framework_title}
@@ -362,7 +397,7 @@ are added once formula-level evidence is ingested — see
 |---|---|
 | Raw methodology | {raw_status} |
 | Source code | {code_status} |
-| BigQuery schemas | Not ingested (scaffold) |
+| BigQuery schemas | {bq_status} |
 | Report mappings | Not ingested (scaffold) |
 
 {_scaffold_note(ctx, "framework page")}
@@ -467,8 +502,14 @@ Framework: [{ctx.framework_title}]({ctx.link_from(d, ctx.framework_rel)})
 # --- Output ---------------------------------------------------------------------
 
 
+def _md_cell(text: str) -> str:
+    """Escape a value for use inside a Markdown table cell."""
+    return text.replace("|", "\\|").replace("\n", " ").strip()
+
+
 def render_output_page(ctx: _Ctx, table: str, rel: str, title: str) -> str:
     d = "outputs"
+    schema = ctx.bq_schema(table)
     fm = _base_fm(
         ctx,
         type_="Output",
@@ -492,22 +533,110 @@ def render_output_page(ctx: _Ctx, table: str, rel: str, title: str) -> str:
         "No code repositories are configured for this chain.",
     )
 
+    if schema is not None:
+        part = schema.partitioning
+        rows = [f"| Table | `{schema.table_id}` |", f"| Type | {schema.table_type} |"]
+        if schema.description:
+            rows.append(f"| Description | {_md_cell(schema.description)} |")
+        if part is not None and part.get("kind") == "time":
+            where = f"on `{part['field']}`" if part.get("field") else "(ingestion time)"
+            rows.append(f"| Partitioning | Time-partitioned ({part.get('type')}) {where} |")
+        elif part is not None and part.get("kind") == "range":
+            rows.append(f"| Partitioning | Range-partitioned on `{part.get('field')}` |")
+        else:
+            rows.append("| Partitioning | None |")
+        if schema.clustering:
+            clustered = ", ".join(f"`{c}`" for c in schema.clustering)
+            rows.append(f"| Clustering | {clustered} |")
+        if schema.last_modified:
+            rows.append(f"| Last modified | {schema.last_modified} |")
+        table_section = (
+            "| Field | Value |\n|---|---|\n"
+            + "\n".join(rows)
+            + "\n\nSchema metadata was loaded from BigQuery at generate time "
+            "(schema only — no rows were queried)."
+        )
+        if schema.view_sql:
+            table_section += (
+                "\n\nView definition (from BigQuery metadata):\n\n"
+                f"```sql\n{schema.view_sql.strip()}\n```"
+            )
+    else:
+        table_section = f"`{table}`"
+
+    if schema is not None and schema.partitioning and schema.partitioning.get("kind") == "time":
+        part = schema.partitioning
+        field_txt = (
+            f" on `{part['field']}`" if part.get("field") else " (ingestion time)"
+        )
+        grain = (
+            f"The table is time-partitioned ({part.get('type')}){field_txt} per "
+            "the loaded BigQuery schema. Partitioning indicates the storage "
+            "grain; the business grain has not been cross-checked against code "
+            "or methodology — see the framework page's "
+            f"[Known Gaps]({framework_link}#known-gaps)."
+        )
+    elif schema is not None:
+        grain = (
+            "The loaded BigQuery schema defines no partitioning for this "
+            f"{'view' if schema.table_type.upper() == 'VIEW' else 'table'}. "
+            "The business grain has not been documented — see the framework "
+            f"page's [Known Gaps]({framework_link}#known-gaps)."
+        )
+    else:
+        grain = (
+            "Not yet documented — the table grain will be recorded once "
+            "BigQuery schema evidence is ingested (tracked in the framework "
+            f"page's [Known Gaps]({framework_link}#known-gaps))."
+        )
+
+    if schema is not None and schema.columns:
+        col_rows = "\n".join(
+            f"| `{col.name}` | {col.type} | {col.mode} | "
+            f"{_md_cell(col.description) if col.description else '—'} |"
+            for col in schema.columns
+        )
+        columns = (
+            "| Column | Type | Mode | Description |\n|---|---|---|---|\n"
+            + col_rows
+            + "\n\nColumns, types, and descriptions come from the loaded "
+            "BigQuery schema. Business meaning beyond the column descriptions "
+            "has not been verified."
+        )
+    elif schema is not None:
+        columns = "The loaded BigQuery schema reports no columns for this table."
+    else:
+        columns = "Not yet documented — no schema evidence has been ingested for this table."
+
+    if schema is not None:
+        verification = (
+            "Verified from BigQuery schema metadata (schema only — no rows "
+            "were queried, no SELECT statements were run, and no data values "
+            "are stored). Table identity, type, columns, partitioning, and "
+            "clustering above come from the loaded schema. Formula behavior "
+            "and business grain remain unverified — see the framework page's "
+            f"[Known Gaps]({framework_link}#known-gaps)."
+        )
+    else:
+        verification = (
+            f"{_scaffold_note(ctx, 'output page')} The table identity comes "
+            "from the chain config; nothing else has been verified."
+        )
+
     body = f"""\
 # {title}
 
 ## Table
 
-`{table}`
+{table_section}
 
 ## Grain
 
-Not yet documented — the table grain will be recorded once BigQuery schema
-evidence is ingested (tracked in the framework page's
-[Known Gaps]({framework_link}#known-gaps)).
+{grain}
 
 ## Column Definitions
 
-Not yet documented — no schema evidence has been ingested for this table.
+{columns}
 
 ## Key Formula Mapping
 
@@ -525,8 +654,7 @@ evidence is ingested.
 
 ## Verification Status
 
-{_scaffold_note(ctx, "output page")} The table identity comes from the chain
-config; nothing else has been verified.
+{verification}
 
 ## Implementation
 

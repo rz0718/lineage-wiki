@@ -42,7 +42,11 @@ sources:
     tables:
       - example-project.analytics.example_daily_snapshot
     include_sample_rows: false
-    required: true
+    # Schema-only ingestion (no rows are ever queried). required: true fails
+    # the run when BigQuery is unreachable; false records a Known Gap instead.
+    # Mocked schemas: set LINEAGE_WIKI_BQ_FIXTURES=<file> to load schemas
+    # from a local YAML/JSON fixture file instead of BigQuery.
+    required: false
 
   reports:
     - name: Example Daily Report

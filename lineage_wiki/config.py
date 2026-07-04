@@ -63,6 +63,26 @@ class BigQuerySource(_StrictModel):
     include_sample_rows: bool = False
     required: bool = True
 
+    @field_validator("tables")
+    @classmethod
+    def _valid_table_names(cls, tables: list[str]) -> list[str]:
+        for table in tables:
+            parts = table.strip().strip("`").split(".")
+            if len(parts) not in (2, 3) or not all(p.strip() for p in parts):
+                raise ValueError(
+                    f"invalid BigQuery table name {table!r}; expected "
+                    "[project.]dataset.table"
+                )
+        return tables
+
+    def model_post_init(self, __context) -> None:
+        for table in self.tables:
+            if table.strip().strip("`").count(".") == 1 and not self.project:
+                raise ValueError(
+                    f"BigQuery table {table!r} has no project part and no "
+                    "sources.bigquery.project is configured"
+                )
+
 
 class ReportSource(_StrictModel):
     name: str

@@ -86,7 +86,7 @@ are added once formula-level evidence is ingested — see
 |---|---|
 | Raw methodology | Not ingested (scaffold) |
 | Source code | Not loaded — no local clone available |
-| BigQuery schemas | Not ingested (scaffold) |
+| BigQuery schemas | Not loaded — BigQuery unavailable |
 | Report mappings | Not ingested (scaffold) |
 
 Unverified scaffold framework page generated deterministically by `lineage-wiki` from the chain config and locally loaded evidence. No fact on this page has been cross-checked against that evidence yet.
@@ -97,6 +97,7 @@ Unverified scaffold framework page generated deterministically by `lineage-wiki`
 - No component pages exist yet; the component inventory is unknown until formula-level evidence is ingested.
 - Configured raw doc `raw_files/example/methodology.md` was not found at generate time.
 - Repo `example-pipeline` has no local clone available; configured paths and symbols are unverified references (remote GitHub ingestion lands in a later milestone).
+- BigQuery is unavailable (offline mode via LINEAGE_WIKI_BQ_OFFLINE); configured table schemas cannot be ingested.
 - BigQuery schema for `example-project.analytics.example_daily_snapshot` has not been ingested; grain and column definitions are undocumented.
 - Report `Example Daily Report` has no verified source mapping.
 

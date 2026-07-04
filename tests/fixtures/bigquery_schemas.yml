@@ -1,0 +1,46 @@
+# Mocked BigQuery schemas — used by unit tests and credential-free demo runs:
+#
+#   LINEAGE_WIKI_BQ_FIXTURES=tests/fixtures/bigquery_schemas.yml \
+#     uv run lineage-wiki generate --config chains/example.yml
+#
+# Schema metadata only. Fixture files must never contain row-level data.
+tables:
+  example-project.analytics.example_daily_snapshot:
+    table_type: TABLE
+    description: Daily snapshot of example metric values.
+    partitioning:
+      kind: time
+      type: DAY
+      field: snapshot_date
+    clustering:
+      - asset_id
+    last_modified: "2026-07-01T00:00:00+00:00"
+    columns:
+      - name: snapshot_date
+        type: DATE
+        mode: REQUIRED
+        description: Snapshot date (daily grain).
+      - name: asset_id
+        type: STRING
+        mode: REQUIRED
+        description: Asset identifier.
+      - name: quantity
+        type: NUMERIC
+        description: Quantity held at snapshot time.
+      - name: price
+        type: NUMERIC
+        description: Unit price in IDR.
+      - name: total_value
+        type: NUMERIC
+        description: quantity x price.
+  example-project.analytics.example_daily_view:
+    table_type: VIEW
+    view_sql: |
+      SELECT snapshot_date, SUM(total_value) AS total_value
+      FROM `example-project.analytics.example_daily_snapshot`
+      GROUP BY snapshot_date
+    columns:
+      - name: snapshot_date
+        type: DATE
+      - name: total_value
+        type: NUMERIC
