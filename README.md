@@ -21,7 +21,7 @@ Commands:
 
 - `lineage-wiki init` — scaffold config examples, prompt stubs, and the `okf/` structure
 - `lineage-wiki generate --config chains/<chain>.yml` — deterministic OKF scaffold for one chain (pages, all eight indexes, `.lineage-wiki/manifest.yml`, run metadata under `.lineage-wiki/runs/`). `--target-repo <path>` is an alias for `--root`; `--dry-run` previews the full run (writes, protections, evidence, gaps, verification plan, post-run validation) without writing a single file
-- `lineage-wiki update --config chains/<chain>.yml` — diffs source fingerprints (raw doc hashes, local repo git HEAD + path hashes, BigQuery schema hashes, report/config identity) against the manifest, prints an impact plan, and rewrites only affected tool-owned pages. With no source changes it is a strict no-op: no file writes, no manifest churn, no run metadata. BigQuery schema fingerprints ignore last-modified metadata, so plain data loads never trigger rewrites — only real schema changes do.
+- `lineage-wiki update --config chains/<chain>.yml` — diffs source fingerprints (raw doc hashes, local repo git HEAD + path hashes, BigQuery schema hashes, report/config identity) against the manifest, collects git context (commits and files touched since the last recorded run, for the OKF repo and each configured local clone), prints a git-aware impact plan plus the affected indexes, and rewrites only affected tool-owned pages. With no source changes it is a strict no-op: no file writes, no manifest churn, no run metadata. BigQuery schema fingerprints ignore last-modified metadata, so plain data loads never trigger rewrites — only real schema changes do. `--plan-only` prints the changed evidence, git context, affected pages, proposed actions (create/update/unchanged/protected, with diff summaries), and validation risks — and writes nothing.
 - `lineage-wiki verify-bq --config chains/<chain>.yml` — optional, credentialed BigQuery verification (`bigquery_verification` config block). `schema_only` mode checks that configured tables and expected columns exist and fingerprints/capture partitioning, clustering, and view SQL; `profile` mode adds safe aggregate queries (row count, date coverage, null counts, distinct counts, min/max). Detailed results — including SQL and profiled values — go to `.lineage-wiki/runs/<run-id>.json`; OKF output pages receive only summary conclusions under `## Verification Status`.
 - `lineage-wiki validate` — frontmatter, page types, required sections, relative links, frontmatter refs, placeholder checks, and directory-index/metrics-registry membership. Offline only — never calls BigQuery or an LLM.
 - `lineage-wiki configure` — store provider/model settings in `~/.lineage-wiki/config.yml` (outside any target repo). Only the *name* of the API-key environment variable is recorded; secret values are never stored, read back, or printed.
@@ -290,6 +290,7 @@ lineage_wiki/
     bigquery_connector.py    schema-only BigQuery metadata (never queries rows)
   ingestion/
     evidence.py     EvidenceItem model
+    git_context.py  read-only git context (commits/files since the manifest baseline)
     source_loader.py connectors -> normalized EvidenceBundle
     code_indexer.py deterministic symbol location (def/class/assignment)
     fingerprints.py source fingerprints for the manifest

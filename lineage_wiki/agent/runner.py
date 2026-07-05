@@ -21,6 +21,7 @@ from ..constants import (
 )
 from ..examples import EXAMPLE_CHAIN_YAML
 from ..ingestion.fingerprints import compute_fingerprints
+from ..ingestion.git_context import GitContext, collect_git_context
 from ..ingestion.source_loader import EvidenceBundle
 from ..okf.indexes import build_all_indexes
 from ..okf.sections import diff_summary, merge_manual_sections
@@ -224,6 +225,7 @@ def _build_manifest(
         source_fingerprints=compute_fingerprints(cfg, fingerprint_root or root),
         last_run_at=now,
         last_content_snapshot=compute_snapshot(contents),
+        okf_git_head=okf_git_head(fingerprint_root or root),
     )
 
 
@@ -479,20 +481,117 @@ def run_generate(
 @dataclass
 class UpdateResult(WriteOutcome):
     noop: bool = False
+    plan_only: bool = False
     changes: SourceChanges = field(default_factory=SourceChanges)
     impact: dict[str, list[str]] = field(default_factory=dict)
+    git_context: list[str] = field(default_factory=list)
+    indexes_affected: list[str] = field(default_factory=list)
+    actions: list[str] = field(default_factory=list)  # plan-only: proposed actions
+    risks: list[str] = field(default_factory=list)  # plan-only: validation risks
     gaps: list[str] = field(default_factory=list)
     manifest_written: bool = False
     run_file: str | None = None
     report: ValidationReport | None = None
 
 
-def run_update(cfg: ChainConfig, root: str | Path, now: str | None = None) -> UpdateResult:
+def _collect_repo_contexts(
+    cfg: ChainConfig, root: Path, previous: Manifest
+) -> dict[str, GitContext]:
+    contexts: dict[str, GitContext] = {}
+    for repo in cfg.sources.repos:
+        if not repo.local_path:
+            continue
+        local = (root / repo.local_path).resolve()
+        if not local.is_dir():
+            continue
+        baseline = previous.source_fingerprints.repos.get(repo.name)
+        contexts[repo.name] = collect_git_context(
+            local,
+            label=f"repo `{repo.name}`",
+            baseline=baseline.git_head if baseline else None,
+        )
+    return contexts
+
+
+def _plan_only_assessment(
+    cfg: ChainConfig,
+    root: Path,
+    previous: Manifest,
+    plan: ChainPlan,
+    impact_pages: dict[str, list[str]],
+    result: UpdateResult,
+) -> None:
+    """Fill proposed actions and validation risks without writing anything."""
+    drafts = {d.rel_path: d for d in plan.pages}
+    owned = set(previous.generated_files)
+    preserve = cfg.generation.preserve_manual_sections
+    for rel in sorted(impact_pages):
+        draft = drafts.get(rel)
+        target = root / rel
+        if draft is None:
+            result.actions.append(
+                f"review    {rel} (not tool-generated; the tool will not edit it)"
+            )
+            if target.exists():
+                result.risks.append(
+                    f"{rel} is affected but hand-written — needs a manual review"
+                )
+            continue
+        if not target.exists():
+            result.actions.append(f"create    {rel}")
+            continue
+        if rel not in owned:
+            result.actions.append(f"protected {rel} (exists but is not tool-owned)")
+            result.risks.append(
+                f"{rel} is affected but not tool-owned — the update will skip "
+                "it; reconcile manually"
+            )
+            continue
+        existing = target.read_text(encoding="utf-8")
+        content = draft.content
+        if preserve:
+            content = merge_manual_sections(existing, content)
+        if materially_equal(existing, content):
+            result.actions.append(f"unchanged {rel}")
+        else:
+            result.actions.append(
+                f"update    {rel} ({diff_summary(existing, content)})"
+            )
+
+    okf_name = cfg.generation.output_dir
+    managed = set(previous.managed_indexes)
+    for rel in result.indexes_affected:
+        target = root / rel
+        if target.exists():
+            text = target.read_text(encoding="utf-8")
+            if rel not in managed and GENERATED_MARKER not in text:
+                result.risks.append(
+                    f"{rel} is hand-written — new/renamed pages must be "
+                    "listed there manually"
+                )
+
+    report = validate_tree(root, okf_dir=okf_name)
+    affected = set(impact_pages)
+    for issue in report.errors + report.warnings:
+        if getattr(issue, "path", None) in affected:
+            result.risks.append(f"pre-existing on {issue.path}: {issue.message}")
+
+
+def run_update(
+    cfg: ChainConfig,
+    root: str | Path,
+    now: str | None = None,
+    *,
+    plan_only: bool = False,
+) -> UpdateResult:
     """Deterministic update: diff evidence fingerprints against the manifest,
-    build an impact plan, and rewrite only affected tool-owned pages.
+    collect git context, build an impact plan, and rewrite only affected
+    tool-owned pages.
 
     With no source changes this is a strict no-op: no OKF file writes, no
-    manifest write, no run metadata.
+    manifest write, no run metadata. With ``plan_only=True`` nothing is
+    written in any case — the result carries the proposed actions and
+    validation risks instead.
     """
     root = Path(root).resolve()
     now = now or now_stamp()
@@ -510,7 +609,15 @@ def run_update(cfg: ChainConfig, root: str | Path, now: str | None = None) -> Up
 
     current = compute_fingerprints(cfg, root)
     changes = diff_fingerprints(previous.source_fingerprints, current)
-    result = UpdateResult(changes=changes)
+    result = UpdateResult(changes=changes, plan_only=plan_only)
+
+    okf_context = collect_git_context(
+        root, label="okf repo", baseline=previous.okf_git_head
+    )
+    repo_contexts = _collect_repo_contexts(cfg, root, previous)
+    result.git_context = [okf_context.describe()] + [
+        ctx.describe() for _, ctx in sorted(repo_contexts.items())
+    ]
 
     if not changes.any():
         result.noop = True
@@ -518,8 +625,14 @@ def run_update(cfg: ChainConfig, root: str | Path, now: str | None = None) -> Up
 
     plan = plan_chain_pages(cfg, root, now)
     result.gaps = plan.gaps
-    impact = build_impact_plan(cfg, root, now, changes, plan.pages)
+    impact = build_impact_plan(cfg, root, now, changes, plan.pages, repo_contexts)
     result.impact = dict(impact.sorted_items())
+    if cfg.generation.update_indexes:
+        result.indexes_affected = impact.affected_indexes(cfg.generation.output_dir)
+
+    if plan_only:
+        _plan_only_assessment(cfg, root, previous, plan, result.impact, result)
+        return result
 
     owned = set(previous.generated_files)
     preserve = cfg.generation.preserve_manual_sections

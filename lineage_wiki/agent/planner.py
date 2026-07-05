@@ -18,10 +18,12 @@ rest.
 
 from __future__ import annotations
 
+import posixpath
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..config import ChainConfig
+from ..ingestion.git_context import GitContext
 from ..okf.indexes import scan_pages
 from ..okf.templates import PageDraft, build_context
 from ..storage.manifest import SourceChanges
@@ -41,6 +43,39 @@ class ImpactPlan:
     def sorted_items(self) -> list[tuple[str, list[str]]]:
         return sorted(self.pages.items())
 
+    def affected_indexes(self, okf: str) -> list[str]:
+        """Indexes the affected pages feed: each touched directory's index
+        plus the root index (its per-vertical blocks list these pages)."""
+        if not self.pages:
+            return []
+        indexes = {f"{okf}/index.md"}
+        for rel in self.pages:
+            parent = posixpath.dirname(rel)
+            if parent and parent != okf:
+                indexes.add(f"{parent}/index.md")
+        return sorted(indexes)
+
+
+def _repo_git_reason(name: str, context: GitContext | None, paths: list[str]) -> str:
+    """Base reason enriched with what git says actually changed."""
+    reason = f"repo `{name}` changed"
+    if context is None or not context.available:
+        return reason
+    details = []
+    if context.commits_since:
+        baseline = (context.baseline or "")[:12]
+        details.append(f"{len(context.commits_since)} commit(s) since {baseline}")
+        touched = sorted(set(context.changed_files) & set(paths))
+        if touched:
+            details.append("configured paths touched: " + ", ".join(touched))
+    if context.dirty_files:
+        dirty = sorted(set(context.dirty_files) & set(paths))
+        if dirty:
+            details.append("uncommitted edits: " + ", ".join(dirty))
+        elif not details:
+            details.append(f"{len(context.dirty_files)} uncommitted change(s)")
+    return reason + (f" ({'; '.join(details)})" if details else "")
+
 
 def build_impact_plan(
     cfg: ChainConfig,
@@ -48,6 +83,7 @@ def build_impact_plan(
     now: str,
     changes: SourceChanges,
     planned: list[PageDraft],
+    repo_contexts: dict[str, GitContext] | None = None,
 ) -> ImpactPlan:
     ctx = build_context(cfg, root, now)
     okf = ctx.okf
@@ -74,7 +110,12 @@ def build_impact_plan(
             add(page.rel, reason)
 
     for name in changes.repos:
-        reason = f"repo `{name}` changed"
+        repo_cfg = next((r for r in cfg.sources.repos if r.name == name), None)
+        reason = _repo_git_reason(
+            name,
+            (repo_contexts or {}).get(name),
+            repo_cfg.paths if repo_cfg else [],
+        )
         code_link = next((rel for r, rel, _ in ctx.code_links if r.name == name), None)
         if code_link:
             add(code_link, reason)

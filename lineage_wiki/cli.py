@@ -221,14 +221,29 @@ def update(
         Path, typer.Option("--config", help="Chain YAML config file.")
     ],
     root: RootOpt = Path("."),
+    plan_only: Annotated[
+        bool,
+        typer.Option(
+            "--plan-only",
+            help=(
+                "Print changed evidence, git context, affected pages, "
+                "proposed actions, and validation risks — write nothing."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Deterministic update: diff source fingerprints, rewrite only affected pages."""
     cfg = _load_config_or_exit(config)
     try:
-        result = run_update(cfg, root)
+        result = run_update(cfg, root, plan_only=plan_only)
     except (GenerateError, SourceUnavailableError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(code=1)
+
+    if result.git_context:
+        typer.echo("git context:")
+        for line in result.git_context:
+            typer.echo(f"  - {line}")
 
     if result.noop:
         typer.secho(
@@ -244,6 +259,27 @@ def update(
     typer.echo("impact plan (pages to consider):")
     for rel, reasons in result.impact.items():
         typer.echo(f"  - {rel}  [{'; '.join(reasons)}]")
+    if result.indexes_affected:
+        typer.echo("indexes affected:")
+        for rel in result.indexes_affected:
+            typer.echo(f"  - {rel}")
+
+    if plan_only:
+        typer.echo("proposed actions:")
+        for line in result.actions:
+            typer.echo(f"  {line}")
+        typer.echo("validation risks:")
+        if result.risks:
+            for line in result.risks:
+                typer.secho(f"  - {line}", fg=typer.colors.YELLOW)
+        else:
+            typer.echo("  - none detected")
+        typer.secho(
+            "plan-only: no files were written — run without --plan-only to "
+            "apply.",
+            fg=typer.colors.CYAN,
+        )
+        return
 
     _print_write_outcome(result, dry_run=False)
     typer.echo(

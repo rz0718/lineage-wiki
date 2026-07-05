@@ -44,6 +44,10 @@ class Manifest(BaseModel):
     source_fingerprints: SourceFingerprints = Field(default_factory=SourceFingerprints)
     last_run_at: str = ""
     last_content_snapshot: str = ""
+    # Baseline for git context on later update runs ("what happened in the
+    # OKF repo since the last content-changing run?"). Informational only —
+    # excluded from equality so a plain commit never churns the manifest.
+    okf_git_head: str | None = None
 
 
 def manifest_path(root: str | Path) -> Path:
@@ -82,7 +86,8 @@ def compute_snapshot(contents: dict[str, str]) -> str:
 
 
 def manifests_equal_ignoring_run_time(a: Manifest, b: Manifest) -> bool:
-    return a.model_dump(exclude={"last_run_at"}) == b.model_dump(exclude={"last_run_at"})
+    exclude = {"last_run_at", "okf_git_head"}
+    return a.model_dump(exclude=exclude) == b.model_dump(exclude=exclude)
 
 
 # --- Fingerprint diffing ---------------------------------------------------------
