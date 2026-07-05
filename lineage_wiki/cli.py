@@ -81,9 +81,20 @@ def init(
             help="Append the OKF instruction block to AGENTS.md and CLAUDE.md.",
         ),
     ] = False,
+    github_action: Annotated[
+        bool,
+        typer.Option(
+            "--github-action",
+            help=(
+                "Write .github/workflows/lineage-wiki-update.yml — a "
+                "scheduled update run that opens a PR only when OKF "
+                "content changes."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Scaffold config examples, prompt stubs, and the okf/ structure."""
-    result = run_init(root, agents=agents)
+    result = run_init(root, agents=agents, github_action=github_action)
     for rel in result.created:
         typer.echo(f"created   {rel}")
     for rel in result.updated:

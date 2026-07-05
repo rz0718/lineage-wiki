@@ -247,6 +247,33 @@ Anthropic-compatible endpoints) → the chain config's `model:` block.
 is written). Prompts live in `.lineage-wiki/prompts/*.md` in the target
 repo (written by `init`) and can be edited per repo.
 
+## Scheduled GitHub Action
+
+```bash
+uv run lineage-wiki init --github-action --root /path/to/wiki-repo
+```
+
+writes `.github/workflows/lineage-wiki-update.yml`: a daily (plus
+manually dispatchable) run that installs Python and `lineage-wiki`, runs
+`lineage-wiki update` for every config under `chains/*.yml`, runs
+`lineage-wiki validate`, and opens a pull request **only when OKF content
+changed** — update runs are strict no-ops otherwise, so quiet days produce
+no branch and no PR.
+
+Secrets (repo Settings → Secrets and variables → Actions), all optional:
+
+- `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` — only needed if you add
+  `--use-llm` to the update step.
+- `GCP_SERVICE_ACCOUNT_JSON` — service-account JSON for BigQuery schema
+  ingestion / `verify-bq`; without it, `required: false` sources become
+  Known Gaps and the run still succeeds.
+- The PR step authenticates with the workflow's built-in `GITHUB_TOKEN`.
+
+No secret value is ever committed: the workflow file references secrets
+via `${{ secrets.* }}` expressions only, BigQuery credentials are written
+to `$RUNNER_TEMP` (outside the checkout), and the PR step stages only
+`okf/` and `.lineage-wiki/`.
+
 ## Tests
 
 ```bash
@@ -269,6 +296,7 @@ lineage_wiki/
   constants.py      OKF taxonomy, required sections, validation rules
   providers.py      LLM provider abstraction (OpenAI-compatible, Anthropic, mock)
   credentials.py    ~/.lineage-wiki/config.yml — provider settings, never secrets
+  github_action.py  scheduled update workflow scaffold (init --github-action)
   okf/
     schemas.py      OkfPage model, frontmatter render/parse
     templates.py    deterministic Markdown templates for all page types

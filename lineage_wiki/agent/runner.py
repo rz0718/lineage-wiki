@@ -88,7 +88,13 @@ def upsert_agent_context(existing: str) -> tuple[str, str]:
     return existing.rstrip("\n") + "\n\n" + AGENT_INSTRUCTIONS_BLOCK, "appended"
 
 
-def run_init(root: str | Path, *, agents: bool = False, now: str | None = None) -> InitResult:
+def run_init(
+    root: str | Path,
+    *,
+    agents: bool = False,
+    github_action: bool = False,
+    now: str | None = None,
+) -> InitResult:
     """Scaffold a target repo: config examples, prompt stubs, okf/ structure."""
     root = Path(root).resolve()
     now = now or now_stamp()
@@ -116,6 +122,11 @@ def run_init(root: str | Path, *, agents: bool = False, now: str | None = None) 
     if okf_missing:
         for draft in build_all_indexes(okf_dir, now):
             write_if_missing(draft.rel_path, draft.content)
+
+    if github_action:
+        from ..github_action import WORKFLOW_REL_PATH, render_workflow
+
+        write_if_missing(WORKFLOW_REL_PATH, render_workflow())
 
     if agents:
         for name in ("AGENTS.md", "CLAUDE.md"):
