@@ -86,13 +86,17 @@ def init(
     result = run_init(root, agents=agents)
     for rel in result.created:
         typer.echo(f"created   {rel}")
+    for rel in result.updated:
+        typer.echo(f"updated   {rel}")
     for rel in result.skipped:
         typer.echo(f"exists    {rel}")
-    typer.secho(
+    summary = (
         f"init done — {len(result.created)} file(s) created, "
-        f"{len(result.skipped)} already present.",
-        fg=typer.colors.GREEN,
+        f"{len(result.skipped)} already present."
     )
+    if result.updated:
+        summary = summary[:-1] + f", {len(result.updated)} updated."
+    typer.secho(summary, fg=typer.colors.GREEN)
 
 
 def _print_write_outcome(result, dry_run: bool) -> None:

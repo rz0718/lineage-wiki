@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import tempfile
 from contextlib import contextmanager
@@ -11,6 +12,8 @@ from typing import Iterator
 
 from ..config import ChainConfig
 from ..constants import (
+    AGENT_BLOCK_END,
+    AGENT_BLOCK_START,
     AGENT_INSTRUCTIONS_BLOCK,
     AGENT_INSTRUCTIONS_MARKER,
     GENERATED_MARKER,
@@ -52,7 +55,37 @@ class GenerateError(Exception):
 @dataclass
 class InitResult:
     created: list[str] = field(default_factory=list)
+    updated: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+
+
+def upsert_agent_context(existing: str) -> tuple[str, str]:
+    """Insert or refresh the managed OKF Wiki Context block in an agents
+    file, preserving all unrelated content.
+
+    Returns ``(new_text, action)`` with action one of ``created`` (file was
+    empty/missing), ``updated`` (managed or legacy block replaced),
+    ``appended`` (block added to existing content), ``unchanged``.
+    """
+    block = AGENT_INSTRUCTIONS_BLOCK.rstrip("\n")
+    if not existing.strip():
+        return AGENT_INSTRUCTIONS_BLOCK, "created"
+
+    if AGENT_BLOCK_START in existing and AGENT_BLOCK_END in existing:
+        start = existing.index(AGENT_BLOCK_START)
+        end = existing.index(AGENT_BLOCK_END) + len(AGENT_BLOCK_END)
+        new_text = existing[:start] + block + existing[end:]
+        return (new_text, "unchanged" if new_text == existing else "updated")
+
+    if AGENT_INSTRUCTIONS_MARKER in existing:
+        # Legacy block from before the delimiters existed: replace from its
+        # heading up to the next heading (or EOF), keeping everything else.
+        pattern = rf"(?ms)^{re.escape(AGENT_INSTRUCTIONS_MARKER)}\n.*?(?=^#{{1,2}} |\Z)"
+        new_text = re.sub(pattern, block + "\n\n", existing, count=1)
+        new_text = new_text.rstrip("\n") + "\n"
+        return (new_text, "unchanged" if new_text == existing else "updated")
+
+    return existing.rstrip("\n") + "\n\n" + AGENT_INSTRUCTIONS_BLOCK, "appended"
 
 
 def run_init(root: str | Path, *, agents: bool = False, now: str | None = None) -> InitResult:
@@ -88,12 +121,15 @@ def run_init(root: str | Path, *, agents: bool = False, now: str | None = None) 
         for name in ("AGENTS.md", "CLAUDE.md"):
             path = root / name
             existing = path.read_text(encoding="utf-8") if path.exists() else ""
-            if AGENT_INSTRUCTIONS_MARKER in existing:
+            new_text, action = upsert_agent_context(existing)
+            if action == "unchanged":
                 result.skipped.append(name)
                 continue
-            joined = existing.rstrip() + "\n\n" if existing.strip() else ""
-            path.write_text(joined + AGENT_INSTRUCTIONS_BLOCK, encoding="utf-8")
-            result.created.append(name)
+            path.write_text(new_text, encoding="utf-8")
+            if action == "created":
+                result.created.append(name)
+            else:  # updated or appended — an existing file was modified
+                result.updated.append(name)
 
     return result
 

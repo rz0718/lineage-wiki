@@ -153,9 +153,18 @@ PRESERVED_SECTIONS = ("Verification Status", "Known Doc-vs-Code Divergences")
 MANIFEST_DIR = ".lineage-wiki"
 MANIFEST_FILE = f"{MANIFEST_DIR}/manifest.yml"
 
+# Legacy heading marker: blocks written before the start/end comment
+# markers existed are recognized (and migrated) by this heading.
 AGENT_INSTRUCTIONS_MARKER = "## OKF Wiki Context"
 
-AGENT_INSTRUCTIONS_BLOCK = """\
+# Managed-block delimiters in AGENTS.md / CLAUDE.md. Everything between
+# them is owned by `lineage-wiki init --agents` and is replaced on update;
+# everything outside them is never touched.
+AGENT_BLOCK_START = "<!-- okf-wiki-context:start -->"
+AGENT_BLOCK_END = "<!-- okf-wiki-context:end -->"
+
+AGENT_INSTRUCTIONS_BLOCK = f"""\
+{AGENT_BLOCK_START}
 ## OKF Wiki Context
 
 This repository contains an Open Knowledge Format catalog under `okf/`.
@@ -169,13 +178,15 @@ liquidity definitions:
 
 1. Start from `okf/index.md`.
 2. Follow links to the relevant framework, component, output, code-link,
-   metric, report-template, and change-check pages.
+   report-template, metric, and change-check pages.
 3. Do not change formulas, table mappings, or report behavior without
    updating the relevant OKF pages.
-4. If code and OKF conflict, flag the divergence and update the relevant
-   change-check page.
-5. Do not invent formulas, code paths, output columns, or report behavior
-   when the traceability chain is missing.
+4. If code and OKF conflict, record the divergence (the framework page's
+   `## Known Doc-vs-Code Divergences` section and the relevant
+   change-check page) instead of silently rewriting either side.
+5. Do not invent missing lineage: no formulas, code paths, output columns,
+   or report behavior without evidence — record a Known Gap instead.
+{AGENT_BLOCK_END}
 """
 
 # Prompt stubs written by `lineage-wiki init`. The LLM pipeline that consumes
