@@ -6,7 +6,7 @@ import re
 import os
 import shutil
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
@@ -33,12 +33,14 @@ from ..okf.sections import diff_summary, merge_manual_sections
 from ..okf.templates import ChainPlan, plan_chain_pages
 from ..okf.validator import ValidationReport, validate_tree
 from ..storage.manifest import (
+    ChainManifest,
     Manifest,
     SourceChanges,
     compute_file_snapshots,
     compute_snapshot,
     diff_fingerprints,
     load_manifest,
+    manifest_lock,
     manifests_equal_ignoring_run_time,
     save_manifest,
 )
@@ -353,12 +355,7 @@ def _index_is_owned_by_tool(rel: str, text: str, previous: Manifest | None) -> b
         return True
     if rel not in set(previous.managed_indexes):
         return False
-    recorded = previous.file_snapshots.get(rel)
-    if not recorded:
-        # Backward-compatible ownership for manifests written before per-file
-        # snapshots existed: the marker is all we can trust.
-        return True
-    return compute_snapshot({rel: text}) == recorded
+    return previous.matching_index_snapshot(rel, text)
 
 
 def _write_indexes(
@@ -403,11 +400,11 @@ def _build_manifest(
     now: str,
     plan: ChainPlan,
     out: WriteOutcome,
-    previous: Manifest | None,
+    previous: ChainManifest | None,
     owned_indexes: list[str],
     *,
     fingerprint_root: Path | None = None,
-) -> Manifest:
+) -> ChainManifest:
     okf_name = cfg.generation.output_dir
     owned = set(previous.generated_files) if previous else set()
     generated_files = sorted(
@@ -421,8 +418,7 @@ def _build_manifest(
         path = root / rel
         if path.exists():
             contents[rel] = path.read_text(encoding="utf-8")
-    return Manifest(
-        chain_id=cfg.chain.id,
+    return ChainManifest(
         chain_slug=cfg.chain.slug,
         output_dir=okf_name,
         generated_files=generated_files,
@@ -437,6 +433,27 @@ def _build_manifest(
         last_content_snapshot=compute_snapshot(contents),
         okf_git_head=okf_git_head(fingerprint_root or root),
     )
+
+
+def _with_chain_entry(
+    previous: Manifest | None, chain_id: str, entry: ChainManifest
+) -> Manifest:
+    manifest = previous.model_copy(deep=True) if previous else Manifest()
+    manifest.chains[chain_id] = entry
+    return manifest
+
+
+def _chain_entries_equal_ignoring_run_time(
+    a: ChainManifest | None, b: ChainManifest | None
+) -> bool:
+    if a is None or b is None:
+        return a is b
+    left = a.model_dump()
+    right = b.model_dump()
+    for data in (left, right):
+        data.pop("last_run_at", None)
+        data.pop("okf_git_head", None)
+    return left == right
 
 
 def _record_run(
@@ -602,7 +619,8 @@ def _finalize_staged_run(
     command: str,
     plan: ChainPlan,
     out,
-    previous: Manifest | None,
+    previous_manifest: Manifest | None,
+    previous_entry: ChainManifest | None,
     *,
     dry_run: bool = False,
     fingerprint_root: Path | None = None,
@@ -616,48 +634,64 @@ def _finalize_staged_run(
     """
     manifest_rel: str | None = None
     run_rels: list[str] = []
-    with _shadow_tree(root, cfg.generation.output_dir, dict(out.pending)) as shadow:
-        owned_indexes = _write_indexes(cfg, shadow, now, out, previous)
-        _apply_pending(shadow, out.pending)
-
-        manifest = _build_manifest(
-            cfg,
-            shadow,
-            now,
-            plan,
-            out,
-            previous,
-            owned_indexes,
-            fingerprint_root=fingerprint_root or root,
+    lock = nullcontext() if dry_run else manifest_lock(root)
+    with lock:
+        latest_manifest = previous_manifest if dry_run else load_manifest(root)
+        latest_entry = (
+            latest_manifest.chains.get(cfg.chain.id) if latest_manifest else None
         )
-        if out.content_changed() and (
-            previous is None or not manifests_equal_ignoring_run_time(previous, manifest)
+        if not _chain_entries_equal_ignoring_run_time(
+            previous_entry, latest_entry
         ):
-            save_manifest(shadow, manifest)
-            out.manifest_written = True
-            manifest_rel = MANIFEST_FILE
-
-        if not dry_run:
-            run_file = _record_run(
-                cfg, shadow, now, command, plan, out, git_root=root
+            raise GenerateError(
+                f"manifest entry for chain {cfg.chain.id!r} changed during "
+                "this run; retry the command"
             )
-            out.run_file = run_file
-            if run_file:
-                run_rels.append(run_file)
-            if llm_transcript is not None and out.content_changed():
-                path = write_json_run(shadow, now, "generate-llm", llm_transcript)
-                run_rels.append(path.relative_to(shadow).as_posix())
 
-        out.report = validate_tree(shadow, okf_dir=cfg.generation.output_dir)
-        if dry_run:
-            return
+        with _shadow_tree(root, cfg.generation.output_dir, dict(out.pending)) as shadow:
+            owned_indexes = _write_indexes(cfg, shadow, now, out, latest_manifest)
+            _apply_pending(shadow, out.pending)
 
-        commit_rels = list(out.pending) + run_rels
-        if manifest_rel:
-            commit_rels.append(manifest_rel)
-        if commit_rels:
-            _raise_if_validation_failed(out.report)
-        _commit_staged_files(root, shadow, commit_rels)
+            entry = _build_manifest(
+                cfg,
+                shadow,
+                now,
+                plan,
+                out,
+                latest_entry,
+                owned_indexes,
+                fingerprint_root=fingerprint_root or root,
+            )
+            manifest = _with_chain_entry(latest_manifest, cfg.chain.id, entry)
+            if out.content_changed() and (
+                latest_manifest is None
+                or not manifests_equal_ignoring_run_time(latest_manifest, manifest)
+            ):
+                save_manifest(shadow, manifest)
+                out.manifest_written = True
+                manifest_rel = MANIFEST_FILE
+
+            if not dry_run:
+                run_file = _record_run(
+                    cfg, shadow, now, command, plan, out, git_root=root
+                )
+                out.run_file = run_file
+                if run_file:
+                    run_rels.append(run_file)
+                if llm_transcript is not None and out.content_changed():
+                    path = write_json_run(shadow, now, "generate-llm", llm_transcript)
+                    run_rels.append(path.relative_to(shadow).as_posix())
+
+            out.report = validate_tree(shadow, okf_dir=cfg.generation.output_dir)
+            if dry_run:
+                return
+
+            commit_rels = list(out.pending) + run_rels
+            if manifest_rel:
+                commit_rels.append(manifest_rel)
+            if commit_rels:
+                _raise_if_validation_failed(out.report)
+            _commit_staged_files(root, shadow, commit_rels)
 
 
 def run_generate(
@@ -711,7 +745,10 @@ def run_generate(
             )
         result.llm = enrichment.summary
 
-    previous = load_manifest(root)
+    previous_manifest = load_manifest(root)
+    previous = (
+        previous_manifest.chains.get(cfg.chain.id) if previous_manifest else None
+    )
     owned = set(previous.generated_files) if previous else set()
 
     if cfg.generation.overwrite_policy == "fail_if_exists":
@@ -737,6 +774,7 @@ def run_generate(
         "generate",
         plan,
         result,
+        previous_manifest,
         previous,
         dry_run=dry_run,
         fingerprint_root=root,
@@ -766,7 +804,7 @@ class UpdateResult(WriteOutcome):
 
 
 def _collect_repo_contexts(
-    cfg: ChainConfig, root: Path, previous: Manifest
+    cfg: ChainConfig, root: Path, previous: ChainManifest
 ) -> dict[str, GitContext]:
     contexts: dict[str, GitContext] = {}
     for repo in cfg.sources.repos:
@@ -787,7 +825,8 @@ def _collect_repo_contexts(
 def _plan_only_assessment(
     cfg: ChainConfig,
     root: Path,
-    previous: Manifest,
+    previous_manifest: Manifest,
+    previous: ChainManifest,
     plan: ChainPlan,
     impact_pages: dict[str, list[str]],
     result: UpdateResult,
@@ -845,7 +884,7 @@ def _plan_only_assessment(
         target = root / rel
         if target.exists():
             text = target.read_text(encoding="utf-8")
-            if not _index_is_owned_by_tool(rel, text, previous):
+            if not _index_is_owned_by_tool(rel, text, previous_manifest):
                 result.risks.append(
                     f"{rel} is hand-written — new/renamed pages must be "
                     "listed there manually"
@@ -878,15 +917,16 @@ def run_update(
     _reject_unsafe_output_dir(root, cfg.generation.output_dir)
     now = now or now_stamp()
 
-    previous = load_manifest(root)
-    if previous is None:
+    previous_manifest = load_manifest(root)
+    if previous_manifest is None:
         raise GenerateError(
             "no manifest found under .lineage-wiki/ — run `lineage-wiki generate` first"
         )
-    if previous.chain_id != cfg.chain.id:
+    previous = previous_manifest.chains.get(cfg.chain.id)
+    if previous is None:
         raise GenerateError(
-            f"manifest belongs to chain {previous.chain_id!r}, config is for "
-            f"{cfg.chain.id!r} — multi-chain manifests land in a later milestone"
+            f"no manifest entry for chain {cfg.chain.id!r} — run "
+            "`lineage-wiki generate` for this chain first"
         )
 
     fingerprint_result = compute_fingerprint_result(
@@ -920,7 +960,9 @@ def run_update(
         result.indexes_affected = impact.affected_indexes(cfg.generation.output_dir)
 
     if plan_only:
-        _plan_only_assessment(cfg, root, previous, plan, result.impact, result)
+        _plan_only_assessment(
+            cfg, root, previous_manifest, previous, plan, result.impact, result
+        )
         return result
 
     owned = set(previous.generated_files)
@@ -940,6 +982,7 @@ def run_update(
         "update",
         plan,
         result,
+        previous_manifest,
         previous,
         fingerprint_root=root,
     )

@@ -26,6 +26,13 @@ Commands:
 - `lineage-wiki validate` — frontmatter, page types, required sections, relative links, frontmatter refs, placeholder checks, and directory-index/metrics-registry membership. Offline only — never calls BigQuery or an LLM.
 - `lineage-wiki configure` — store provider/model settings in `~/.lineage-wiki/config.yml` (outside any target repo). Only the *name* of the API-key environment variable is recorded; secret values are never stored, read back, or printed.
 
+One target OKF repo can hold multiple related chains/verticals. Run
+`generate` once per `chains/*.yml` file against the same `--root`; the shared
+`.lineage-wiki/manifest.yml` is keyed by chain id, so later `update` runs diff
+and rewrite only the requested chain's owned pages while shared indexes reflect
+the whole catalog. Existing single-chain manifests are migrated automatically
+on the next content-changing run.
+
 ## Install
 
 ```bash
@@ -37,6 +44,7 @@ uv sync --extra dev            # or: pip install -e '.[dev]'
 ```bash
 uv run lineage-wiki init --root /path/to/wiki-repo
 uv run lineage-wiki generate --config chains/example.yml --root /path/to/wiki-repo
+uv run lineage-wiki generate --config chains/another-chain.yml --root /path/to/wiki-repo
 uv run lineage-wiki validate --root /path/to/wiki-repo
 ```
 

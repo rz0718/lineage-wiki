@@ -351,7 +351,8 @@ def test_update_preserves_schema_docs_when_optional_bigquery_is_unavailable(
     before_output = output.read_text(encoding="utf-8")
     before_manifest = load_manifest(wiki_root)
     assert before_manifest is not None
-    before_fingerprints = dict(before_manifest.source_fingerprints.bigquery)
+    before_entry = before_manifest.chains[example_cfg.chain.id]
+    before_fingerprints = dict(before_entry.source_fingerprints.bigquery)
     assert before_fingerprints[SNAPSHOT_TABLE].startswith("sha256:")
 
     monkeypatch.delenv("LINEAGE_WIKI_BQ_FIXTURES")
@@ -364,4 +365,5 @@ def test_update_preserves_schema_docs_when_optional_bigquery_is_unavailable(
     assert output.read_text(encoding="utf-8") == before_output
     after_manifest = load_manifest(wiki_root)
     assert after_manifest is not None
-    assert after_manifest.source_fingerprints.bigquery == before_fingerprints
+    after_entry = after_manifest.chains[example_cfg.chain.id]
+    assert after_entry.source_fingerprints.bigquery == before_fingerprints

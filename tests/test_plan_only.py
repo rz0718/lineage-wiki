@@ -193,7 +193,7 @@ def test_repo_change_reason_includes_commits_and_touched_paths(wiki_root):
     _write_raw_doc(wiki_root)
     cfg = _cfg_with_local_clone(wiki_root)
     run_generate(cfg, wiki_root, FIXED_NOW)
-    baseline = load_manifest(wiki_root).source_fingerprints.repos[
+    baseline = load_manifest(wiki_root).chains[cfg.chain.id].source_fingerprints.repos[
         "example-pipeline"
     ].git_head
     assert baseline
@@ -224,7 +224,7 @@ def test_okf_repo_baseline_recorded_and_compared(wiki_root, example_cfg):
 
     run_generate(example_cfg, wiki_root, FIXED_NOW)
     manifest = load_manifest(wiki_root)
-    assert manifest.okf_git_head == first
+    assert manifest.chains[example_cfg.chain.id].okf_git_head == first
 
     _commit_all(wiki_root, "commit generated pages")
     _write_raw_doc(wiki_root, "# Methodology Two\n")

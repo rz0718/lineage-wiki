@@ -107,6 +107,7 @@ def test_fingerprint_only_update_does_not_advance_manifest(example_cfg, tmp_path
     run_generate(example_cfg, root, now=FIXED_NOW)
     before = _tree_state(root)
     before_manifest = load_manifest(root)
+    before_entry = before_manifest.chains[example_cfg.chain.id]
     (repo / "main.py").write_text(
         "def compute_daily_snapshot():\n    return 2\n", encoding="utf-8"
     )
@@ -118,7 +119,8 @@ def test_fingerprint_only_update_does_not_advance_manifest(example_cfg, tmp_path
     assert result.manifest_written is False
     assert result.run_file is None
     assert _tree_state(root) == before
-    assert load_manifest(root).source_fingerprints == before_manifest.source_fingerprints
+    after_entry = load_manifest(root).chains[example_cfg.chain.id]
+    assert after_entry.source_fingerprints == before_entry.source_fingerprints
     again = run_update(example_cfg, root, now=LATER)
     assert again.noop is False
     assert again.changes.repos == ["example-pipeline"]

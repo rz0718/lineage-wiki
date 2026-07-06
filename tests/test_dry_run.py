@@ -153,8 +153,9 @@ def test_hand_written_index_never_enters_manifest(tmp_path, example_cfg):
     manifest = yaml.safe_load(
         (tmp_path / ".lineage-wiki" / "manifest.yml").read_text(encoding="utf-8")
     )
-    assert "okf/index.md" not in manifest["managed_indexes"]
-    assert "okf/frameworks/index.md" in manifest["managed_indexes"]
+    entry = manifest["chains"][example_cfg.chain.id]
+    assert "okf/index.md" not in entry["managed_indexes"]
+    assert "okf/frameworks/index.md" in entry["managed_indexes"]
 
     # And the next run still refuses to touch it.
     again = run_generate(example_cfg, tmp_path, FIXED_NOW)

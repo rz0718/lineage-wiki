@@ -6,6 +6,7 @@ from typer.testing import CliRunner
 
 from lineage_wiki.cli import app
 from lineage_wiki.constants import INDEX_FILES
+from lineage_wiki.storage.manifest import ChainManifest, load_manifest, save_manifest
 
 from .conftest import EXAMPLE_CONFIG, FIXED_NOW
 
@@ -57,6 +58,98 @@ def test_generate_creates_valid_tree(tmp_path):
 
     validated = runner.invoke(app, ["validate", "--root", str(tmp_path)])
     assert validated.exit_code == 0, validated.output
+
+
+def _write_second_config(root):
+    cfg = yaml.safe_load(EXAMPLE_CONFIG.read_text())
+    cfg["chain"]["id"] = "second_chain"
+    cfg["chain"]["slug"] = "second-chain"
+    cfg["chain"]["name"] = "Second Chain"
+    cfg["sources"]["repos"][0]["name"] = "second-pipeline"
+    cfg["sources"]["repos"][0]["local_path"] = "../second-pipeline"
+    cfg["sources"]["bigquery"]["tables"] = [
+        "example-project.analytics.second_daily_snapshot"
+    ]
+    cfg["sources"]["reports"][0]["name"] = "Second Daily Report"
+    cfg["sources"]["metrics"][0]["name"] = "Second Metric"
+    second_config = root / "second.yml"
+    second_config.write_text(yaml.safe_dump(cfg))
+    return second_config
+
+
+def test_generate_second_chain_preserves_first_manifest_entry(tmp_path):
+    first = runner.invoke(
+        app,
+        ["generate", "--config", str(EXAMPLE_CONFIG), "--root", str(tmp_path)],
+    )
+    assert first.exit_code == 0, first.output
+    second_config = _write_second_config(tmp_path)
+
+    second = runner.invoke(
+        app,
+        ["generate", "--config", str(second_config), "--root", str(tmp_path)],
+    )
+
+    assert second.exit_code == 0, second.output
+    assert (tmp_path / "okf" / "frameworks" / "example-chain.md").exists()
+    assert (tmp_path / "okf" / "frameworks" / "second-chain.md").exists()
+    manifest = load_manifest(tmp_path)
+    assert sorted(manifest.chains) == ["example_chain", "second_chain"]
+    assert "okf/frameworks/example-chain.md" in manifest.chains[
+        "example_chain"
+    ].generated_files
+    assert "okf/frameworks/second-chain.md" in manifest.chains[
+        "second_chain"
+    ].generated_files
+    frameworks_index = (tmp_path / "okf" / "frameworks" / "index.md").read_text()
+    assert "[Example Chain Framework](example-chain.md)" in frameworks_index
+    assert "[Second Chain Framework](second-chain.md)" in frameworks_index
+    metrics_index = (tmp_path / "okf" / "metrics" / "index.md").read_text()
+    assert "| Example Metric | [Example Metric](example-metric.md) |" in metrics_index
+    assert "| Second Metric | [Second Metric](second-metric.md) |" in metrics_index
+
+
+def test_generate_merges_manifest_entry_added_after_initial_read(tmp_path, monkeypatch):
+    first = runner.invoke(
+        app,
+        ["generate", "--config", str(EXAMPLE_CONFIG), "--root", str(tmp_path)],
+    )
+    assert first.exit_code == 0, first.output
+    second_config = _write_second_config(tmp_path)
+
+    import lineage_wiki.agent.runner as runner_module
+    import lineage_wiki.storage.manifest as manifest_module
+
+    calls = 0
+
+    def load_with_concurrent_entry(root):
+        nonlocal calls
+        calls += 1
+        manifest = manifest_module.load_manifest(root)
+        if calls == 2:
+            manifest.chains["concurrent_chain"] = ChainManifest(
+                chain_slug="concurrent-chain",
+                generated_files=["okf/frameworks/concurrent-chain.md"],
+                last_content_snapshot="sha256:concurrent",
+            )
+            save_manifest(root, manifest)
+            return manifest_module.load_manifest(root)
+        return manifest
+
+    monkeypatch.setattr(runner_module, "load_manifest", load_with_concurrent_entry)
+
+    second = runner.invoke(
+        app,
+        ["generate", "--config", str(second_config), "--root", str(tmp_path)],
+    )
+
+    assert second.exit_code == 0, second.output
+    manifest = manifest_module.load_manifest(tmp_path)
+    assert sorted(manifest.chains) == [
+        "concurrent_chain",
+        "example_chain",
+        "second_chain",
+    ]
 
 
 def test_second_generate_is_noop(tmp_path):

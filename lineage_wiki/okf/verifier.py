@@ -262,7 +262,8 @@ def _divergences_body(result: VerifyBqResult) -> str:
 def _update_okf_pages(cfg: ChainConfig, root: Path, result: VerifyBqResult) -> None:
     okf = cfg.generation.output_dir
     manifest = load_manifest(root)
-    owned = set(manifest.generated_files) if manifest else set()
+    entry = manifest.chains.get(cfg.chain.id) if manifest else None
+    owned = set(entry.generated_files) if entry else set()
     for tv in result.tables:
         rel = f"{okf}/outputs/{slugify(tv.table.split('.')[-1])}.md"
         _update_owned_section(

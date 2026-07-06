@@ -36,6 +36,19 @@ def _write_raw_doc(root: Path, content: str = "# Methodology\n") -> Path:
     return doc
 
 
+def _second_chain_cfg(example_cfg):
+    cfg = example_cfg.model_copy(deep=True)
+    cfg.chain.id = "second_chain"
+    cfg.chain.slug = "second-chain"
+    cfg.chain.name = "Second Chain"
+    cfg.sources.repos[0].name = "second-pipeline"
+    cfg.sources.repos[0].local_path = "../second-pipeline"
+    cfg.sources.bigquery.tables = ["example-project.analytics.second_daily_snapshot"]
+    cfg.sources.reports[0].name = "Second Daily Report"
+    cfg.sources.metrics[0].name = "Second Metric"
+    return cfg
+
+
 # --- no-op behavior (key acceptance) --------------------------------------------
 
 
@@ -71,12 +84,27 @@ def test_update_requires_manifest(example_cfg, wiki_root):
         run_update(example_cfg, wiki_root, now=FIXED_NOW)
 
 
-def test_update_rejects_other_chain_manifest(example_cfg, wiki_root):
+def test_update_requires_entry_for_requested_chain(example_cfg, wiki_root):
     run_generate(example_cfg, wiki_root, now=FIXED_NOW)
     other = example_cfg.model_copy(deep=True)
     other.chain.id = "other_chain"
-    with pytest.raises(GenerateError, match="other_chain"):
+    with pytest.raises(GenerateError, match="no manifest entry for chain 'other_chain'"):
         run_update(other, wiki_root, now=FIXED_NOW)
+
+
+def test_update_current_chain_in_multichain_manifest(example_cfg, wiki_root):
+    run_generate(example_cfg, wiki_root, now=FIXED_NOW)
+    run_generate(_second_chain_cfg(example_cfg), wiki_root, now=FIXED_NOW)
+    _write_raw_doc(wiki_root)
+
+    result = run_update(example_cfg, wiki_root, now=LATER)
+
+    assert result.updated == ["okf/frameworks/example-chain.md"]
+    manifest = load_manifest(wiki_root)
+    assert sorted(manifest.chains) == ["example_chain", "second_chain"]
+    assert "okf/frameworks/second-chain.md" in manifest.chains[
+        "second_chain"
+    ].generated_files
 
 
 # --- changed-source impact planning ----------------------------------------------
@@ -107,8 +135,8 @@ def test_raw_doc_change_updates_framework_only(example_cfg, wiki_root):
     assert "okf/outputs/example-daily-snapshot.md" not in result.impact
 
     # fingerprints recorded; a second update is a strict no-op
-    manifest = load_manifest(wiki_root)
-    assert manifest.source_fingerprints.raw_docs[
+    entry = load_manifest(wiki_root).chains[example_cfg.chain.id]
+    assert entry.source_fingerprints.raw_docs[
         "raw_files/example/methodology.md"
     ].startswith("sha256:")
     assert run_update(example_cfg, wiki_root, now=LATER).noop is True
@@ -206,8 +234,8 @@ def test_new_metric_is_created_and_registered(example_cfg, wiki_root):
     assert "okf/metrics/index.md" in result.indexes_written
     assert result.report is not None and result.report.errors == []
 
-    manifest = load_manifest(wiki_root)
-    assert "okf/metrics/second-metric.md" in manifest.generated_files
+    entry = load_manifest(wiki_root).chains[example_cfg.chain.id]
+    assert "okf/metrics/second-metric.md" in entry.generated_files
 
 
 # --- run metadata ----------------------------------------------------------------
@@ -243,8 +271,9 @@ def test_human_created_page_is_never_overwritten_by_update(example_cfg, wiki_roo
     run_generate(example_cfg, wiki_root, now=FIXED_NOW)
     # replace a tool page with a human one by removing it from the manifest
     manifest = load_manifest(wiki_root)
-    manifest.generated_files = [
-        f for f in manifest.generated_files if "report-templates" not in f
+    entry = manifest.chains[example_cfg.chain.id]
+    entry.generated_files = [
+        f for f in entry.generated_files if "report-templates" not in f
     ]
     from lineage_wiki.storage.manifest import save_manifest
 
