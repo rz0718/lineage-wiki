@@ -86,7 +86,15 @@ def _merge_gap_block(existing_block: str, draft_block: str) -> str:
     return draft_block.rstrip("\n") + "\n" + "\n".join(carried) + "\n"
 
 
-def _reconcile_gap_bullets(merged: dict[str, str]) -> str:
+def _mentions_evidence(text: str, evidence_id: str) -> bool:
+    # Divergences cite evidence as backtick-wrapped ids ("evidence: `id`"),
+    # not the `[src: id]` marker prose sections use — check both forms.
+    return f"`{evidence_id}`" in text or f"[src: {evidence_id}]" in text
+
+
+def _reconcile_gap_bullets(
+    merged: dict[str, str], stale_evidence: frozenset[str] | set[str] = frozenset()
+) -> str:
     """Drop deterministic Known Gaps bullets that the page's own merged
     content shows as already resolved this run — a grounded Core Formula
     citation, or a recorded divergence citing a table's BigQuery schema —
@@ -94,22 +102,29 @@ def _reconcile_gap_bullets(merged: dict[str, str]) -> str:
     extracted, cited Core Formula. Bullets reappear automatically once the
     citation they depend on is gone (e.g. the section was invalidated and
     reverted to scaffold), since that's re-derived from the merged content
-    every time, not tracked as separate state."""
+    every time, not tracked as separate state.
+
+    ``Known Doc-vs-Code Divergences`` is a preserved section: it survives a
+    scaffold rewrite verbatim, with no staleness check of its own (unlike
+    citation-bearing prose sections). So a divergence recorded before this
+    run can go on citing a table's schema evidence even after that evidence
+    changed. ``stale_evidence`` — this run's changed-evidence ids — is
+    checked explicitly here so a stale citation can never be read as proof
+    a gap is still resolved.
+    """
     block = merged.get("Known Gaps", "")
     lines = block.splitlines()
     if not lines:
         return block
     heading_line, *body_lines = lines
 
-    # Only a formula grounded in raw-doc evidence resolves the "not
-    # extracted from raw docs" bullet — a formula grounded purely in code or
-    # a human note doesn't speak to raw-doc extraction at all.
+    # Only a formula grounded in fresh (non-stale) raw-doc evidence resolves
+    # the "not extracted from raw docs" bullet — a formula grounded purely
+    # in code or a human note doesn't speak to raw-doc extraction at all.
     formula_grounded = any(
-        e.startswith("raw-doc:")
+        e.startswith("raw-doc:") and e not in stale_evidence
         for e in cited_evidence_ids(merged.get("Core Formula", ""))
     )
-    # Divergences cite evidence as backtick-wrapped ids ("evidence: `id`"),
-    # not the `[src: id]` marker prose sections use — check both forms.
     evidence_text = merged.get("Core Formula", "") + merged.get(
         "Known Doc-vs-Code Divergences", ""
     )
@@ -122,11 +137,12 @@ def _reconcile_gap_bullets(merged: dict[str, str]) -> str:
         if formula_grounded and text == RAW_DOC_EXTRACTION_GAP:
             continue
         table = bq_cross_check_table(text)
-        if table is not None and (
-            f"`bq-schema:{table}`" in evidence_text
-            or f"[src: bq-schema:{table}]" in evidence_text
-        ):
-            continue
+        if table is not None:
+            evidence_id = f"bq-schema:{table}"
+            if evidence_id not in stale_evidence and _mentions_evidence(
+                evidence_text, evidence_id
+            ):
+                continue
         kept.append(line)
     if kept == body_lines:
         return block
@@ -202,7 +218,7 @@ def merge_manual_sections(
         merged[heading] = body
 
     if "Known Gaps" in merged:
-        merged["Known Gaps"] = _reconcile_gap_bullets(merged)
+        merged["Known Gaps"] = _reconcile_gap_bullets(merged, stale_evidence)
 
     parts = [draft_prelude] + [merged[heading] for heading in order]
     for heading, block in existing_sections:

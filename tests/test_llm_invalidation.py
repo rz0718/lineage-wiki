@@ -172,6 +172,38 @@ def test_merge_gap_reappears_once_grounding_is_invalidated():
     assert RAW_DOC_EXTRACTION_GAP in merged
 
 
+def test_merge_bq_gap_reappears_when_preserved_divergence_evidence_goes_stale():
+    """`Known Doc-vs-Code Divergences` is a preserved section: it survives a
+    scaffold rewrite verbatim with no staleness check of its own, unlike
+    Core Formula. A stale-but-still-preserved divergence citing a table's
+    schema must not be read as proof that table is still cross-checked."""
+    existing = (
+        "---\ntype: Framework\n---\n# Page\n\n"
+        "## Core Formula\n\nScaffold formula.\n\n"
+        "## Known Doc-vs-Code Divergences\n\n"
+        f"- **Formula wording** — mismatch (evidence: `bq-schema:{TABLE}`)\n\n"
+        "## Known Gaps\n\n"
+        f"- {bq_cross_check_gap(TABLE)}\n"
+    )
+    draft = (
+        "---\ntype: Framework\n---\n# Page\n\n"
+        "## Core Formula\n\nScaffold formula.\n\n"
+        "## Known Doc-vs-Code Divergences\n\nNone recorded yet.\n\n"
+        "## Known Gaps\n\n"
+        f"- {bq_cross_check_gap(TABLE)}\n"
+    )
+    # No schema change this run: the preserved divergence is still valid.
+    fresh = merge_manual_sections(existing, draft)
+    assert bq_cross_check_gap(TABLE) not in fresh
+
+    # The table's schema changed this run: that citation is now stale, so
+    # the preserved (unchanged) divergence text must not resolve the gap.
+    stale = merge_manual_sections(
+        existing, draft, stale_evidence=frozenset({f"bq-schema:{TABLE}"})
+    )
+    assert bq_cross_check_gap(TABLE) in stale
+
+
 def test_stale_evidence_ids_mapping():
     cfg = load_config(EXAMPLE_CONFIG)
     changes = SourceChanges(
