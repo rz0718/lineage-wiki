@@ -138,16 +138,19 @@ def test_repo_content_change_plans_code_impact_without_churn(example_cfg, tmp_pa
     for reasons in result.impact.values():
         assert "repo `example-pipeline` changed" in reasons
 
-    # deterministic templates do not embed code content: pages considered but
-    # not rewritten, and no run metadata is churned
+    # deterministic templates do not embed code content: pages are considered
+    # but not rewritten, and source baselines do not advance without a
+    # validated content write.
     assert result.updated == [] and result.created == []
     assert result.run_file is None
-    assert result.manifest_written is True  # new fingerprints recorded
+    assert result.manifest_written is False
 
     after = _tree_state(root)
     changed = {rel for rel in after if after[rel] != before.get(rel)}
-    assert changed == {".lineage-wiki/manifest.yml"}
-    assert run_update(example_cfg, root, now=LATER).noop is True
+    assert changed == set()
+    again = run_update(example_cfg, root, now=LATER)
+    assert again.noop is False
+    assert again.changes.repos == ["example-pipeline"]
 
 
 def test_bigquery_table_addition_impacts_outputs(example_cfg, wiki_root):

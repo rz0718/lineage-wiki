@@ -41,6 +41,7 @@ class Manifest(BaseModel):
     output_dir: str = "okf"
     generated_files: list[str] = Field(default_factory=list)
     managed_indexes: list[str] = Field(default_factory=list)
+    file_snapshots: dict[str, str] = Field(default_factory=dict)
     source_fingerprints: SourceFingerprints = Field(default_factory=SourceFingerprints)
     last_run_at: str = ""
     last_content_snapshot: str = ""
@@ -83,6 +84,11 @@ def compute_snapshot(contents: dict[str, str]) -> str:
         digest.update(contents[rel].encode("utf-8"))
         digest.update(b"\0")
     return f"sha256:{digest.hexdigest()}"
+
+
+def compute_file_snapshots(contents: dict[str, str]) -> dict[str, str]:
+    """Per-file content hashes for ownership drift checks."""
+    return {rel: compute_snapshot({rel: text}) for rel, text in sorted(contents.items())}
 
 
 def manifests_equal_ignoring_run_time(a: Manifest, b: Manifest) -> bool:

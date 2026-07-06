@@ -196,9 +196,10 @@ def validate_tree(root: str | Path, okf_dir: str = "okf") -> ValidationReport:
         if index_path.exists():
             text = index_path.read_text(encoding="utf-8")
             index_rel = index_path.relative_to(root).as_posix()
-            hand_written_index[subdir] = (
-                index_rel not in managed_indexes and GENERATED_MARKER not in text
-            )
+            if manifest:
+                hand_written_index[subdir] = index_rel not in managed_indexes
+            else:
+                hand_written_index[subdir] = GENERATED_MARKER not in text
             body = parse_page(text).body
             for link in LINK_RE.findall(body):
                 if not link.startswith(("http://", "https://")):

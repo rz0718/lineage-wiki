@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import os
 import shutil
 import tempfile
 from contextlib import contextmanager
@@ -18,6 +19,7 @@ from ..constants import (
     AGENT_INSTRUCTIONS_MARKER,
     GENERATED_MARKER,
     MANIFEST_DIR,
+    MANIFEST_FILE,
     OKF_SUBDIRS,
     PRESERVED_SECTIONS,
     PROMPT_STUBS,
@@ -33,13 +35,14 @@ from ..okf.validator import ValidationReport, validate_tree
 from ..storage.manifest import (
     Manifest,
     SourceChanges,
+    compute_file_snapshots,
     compute_snapshot,
     diff_fingerprints,
     load_manifest,
     manifests_equal_ignoring_run_time,
     save_manifest,
 )
-from ..storage.runs import RunRecord, okf_git_head, write_run
+from ..storage.runs import RunRecord, okf_git_head, write_json_run, write_run
 from ..storage.snapshots import materially_equal
 from ..util import now_stamp
 from .planner import build_impact_plan
@@ -163,6 +166,114 @@ class WriteOutcome:
         return bool(self.created or self.updated or self.indexes_written)
 
 
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _reject_unsafe_output_dir(root: Path, output_dir: str) -> None:
+    """Fail before planning writes when the OKF output directory is unsafe."""
+    rel = Path(output_dir)
+    if not output_dir.strip() or rel.is_absolute() or any(part == ".." for part in rel.parts):
+        raise GenerateError(
+            f"unsafe output_dir {output_dir!r}: use a relative path inside the target root"
+        )
+    if rel == Path(".") or any(part in ("", ".") for part in rel.parts):
+        raise GenerateError(f"unsafe output_dir {output_dir!r}: use a named subdirectory")
+
+    target = root / rel
+    existing = target if target.exists() else target.parent
+    while existing != root and not existing.exists():
+        existing = existing.parent
+    if existing.exists():
+        if existing.is_symlink():
+            raise GenerateError(
+                f"unsafe output_dir {output_dir!r}: {existing.relative_to(root).as_posix()} is a symlink"
+            )
+        if not existing.is_dir():
+            raise GenerateError(
+                f"unsafe output_dir {output_dir!r}: {existing.relative_to(root).as_posix()} is not a directory"
+            )
+        if not _is_relative_to(existing.resolve(), root):
+            raise GenerateError(
+                f"unsafe output_dir {output_dir!r}: resolved path escapes the target root"
+            )
+
+
+def _safe_target(root: Path, rel: str) -> Path:
+    root = root.resolve()
+    rel_path = Path(rel)
+    if rel_path.is_absolute() or any(part in ("", ".", "..") for part in rel_path.parts):
+        raise GenerateError(f"unsafe write target {rel!r}: must stay inside the target root")
+    target = root / rel_path
+    current = root
+    for part in rel_path.parts[:-1]:
+        current = current / part
+        if current.exists():
+            if current.is_symlink():
+                raise GenerateError(
+                    f"unsafe write target {rel!r}: parent {current.relative_to(root).as_posix()} is a symlink"
+                )
+            if not current.is_dir():
+                raise GenerateError(
+                    f"unsafe write target {rel!r}: parent {current.relative_to(root).as_posix()} is not a directory"
+                )
+            if not _is_relative_to(current.resolve(), root):
+                raise GenerateError(
+                    f"unsafe write target {rel!r}: resolved parent escapes the target root"
+                )
+    if target.exists() and target.is_symlink():
+        raise GenerateError(f"unsafe write target {rel!r}: target is a symlink")
+    return target
+
+
+def _apply_pending(root: Path, pending: dict[str, str]) -> None:
+    for rel, content in pending.items():
+        target = _safe_target(root, rel)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+
+def _atomic_replace_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as tmp:
+            tmp.write(data)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            tmp_name = tmp.name
+        os.replace(tmp_name, path)
+    finally:
+        if tmp_name and Path(tmp_name).exists():
+            Path(tmp_name).unlink()
+
+
+def _commit_staged_files(root: Path, stage: Path, rels: list[str]) -> None:
+    unique_rels = list(dict.fromkeys(rels))
+    targets = {rel: _safe_target(root, rel) for rel in unique_rels}
+    for rel in unique_rels:
+        staged = stage / rel
+        if not staged.is_file():
+            raise GenerateError(f"staged write missing for {rel}")
+    for rel in unique_rels:
+        _atomic_replace_bytes(targets[rel], (stage / rel).read_bytes())
+
+
+def _raise_if_validation_failed(report: ValidationReport) -> None:
+    if not report.failed():
+        return
+    details = "; ".join(str(issue) for issue in report.errors[:5])
+    if len(report.errors) > 5:
+        details += f"; ... {len(report.errors) - 5} more error(s)"
+    raise GenerateError(f"staged output failed validation: {details}")
+
+
 def _write_page(
     root: Path,
     rel: str,
@@ -190,15 +301,25 @@ def _write_page(
             return
         out.diffs[rel] = diff_summary(existing, content)
         out.pending[rel] = content
-        if not dry_run:
-            target.write_text(content, encoding="utf-8")
         out.updated.append(rel)
     else:
         out.pending[rel] = content
-        if not dry_run:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
         out.created.append(rel)
+
+
+def _index_is_owned_by_tool(rel: str, text: str, previous: Manifest | None) -> bool:
+    if GENERATED_MARKER not in text:
+        return False
+    if previous is None:
+        return True
+    if rel not in set(previous.managed_indexes):
+        return False
+    recorded = previous.file_snapshots.get(rel)
+    if not recorded:
+        # Backward-compatible ownership for manifests written before per-file
+        # snapshots existed: the marker is all we can trust.
+        return True
+    return compute_snapshot({rel: text}) == recorded
 
 
 def _write_indexes(
@@ -208,22 +329,22 @@ def _write_indexes(
     out: WriteOutcome,
     previous: Manifest | None,
 ) -> list[str]:
-    """Write tool-owned index files; returns the rels this run owns.
+    """Plan tool-owned index writes; returns the rels this run owns.
 
-    An existing index is owned only if a previous manifest lists it under
-    ``managed_indexes`` or its content carries the generated-by marker —
-    hand-written indexes are never overwritten.
+    An existing index is owned only when it is still recognizable as tool
+    generated and, for previously managed indexes, unchanged from the last
+    successful run. Manual index edits therefore make the whole index
+    protected until a human deliberately reconciles it.
     """
     owned_indexes: list[str] = []
     if not cfg.generation.update_indexes:
         return owned_indexes
     okf_name = cfg.generation.output_dir
-    managed = set(previous.managed_indexes) if previous else set()
     for draft in build_all_indexes(root / okf_name, now, okf_name):
         target = root / draft.rel_path
         if target.exists():
             existing = target.read_text(encoding="utf-8")
-            if draft.rel_path not in managed and GENERATED_MARKER not in existing:
+            if not _index_is_owned_by_tool(draft.rel_path, existing, previous):
                 out.indexes_skipped.append(draft.rel_path)
                 continue
             owned_indexes.append(draft.rel_path)
@@ -233,8 +354,6 @@ def _write_indexes(
         else:
             owned_indexes.append(draft.rel_path)
         out.pending[draft.rel_path] = draft.content
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(draft.content, encoding="utf-8")
         out.indexes_written.append(draft.rel_path)
     return owned_indexes
 
@@ -269,6 +388,7 @@ def _build_manifest(
         output_dir=okf_name,
         generated_files=generated_files,
         managed_indexes=managed_indexes,
+        file_snapshots=compute_file_snapshots(contents),
         source_fingerprints=compute_fingerprints(cfg, fingerprint_root or root),
         last_run_at=now,
         last_content_snapshot=compute_snapshot(contents),
@@ -277,11 +397,19 @@ def _build_manifest(
 
 
 def _record_run(
-    cfg: ChainConfig, root: Path, now: str, command: str, plan: ChainPlan, out: WriteOutcome
+    cfg: ChainConfig,
+    root: Path,
+    now: str,
+    command: str,
+    plan: ChainPlan,
+    out: WriteOutcome,
+    *,
+    git_root: Path | None = None,
 ) -> str | None:
     """Write run metadata — but never churn it on no-op runs."""
     if not out.content_changed():
         return None
+    git_root = git_root or root
     path = write_run(
         root,
         RunRecord(
@@ -289,7 +417,7 @@ def _record_run(
             command=command,
             chainId=cfg.chain.id,
             model=cfg.model.model,
-            okfGitHead=okf_git_head(root),
+            okfGitHead=okf_git_head(git_root),
             contentChanged=True,
             createdFiles=sorted(out.created),
             updatedFiles=sorted(out.updated + out.indexes_written),
@@ -387,22 +515,25 @@ def _shadow_tree(root: Path, okf_name: str, pending: dict[str, str]) -> Iterator
     with tempfile.TemporaryDirectory(prefix="lineage-wiki-dry-run-") as td:
         shadow = Path(td) / "repo"
         shadow.mkdir()
-        for entry in root.iterdir():
-            if entry.name in (okf_name, MANIFEST_DIR, ".git"):
-                continue
-            (shadow / entry.name).symlink_to(entry)
-        src_okf = root / okf_name
-        if src_okf.is_dir():
-            shutil.copytree(src_okf, shadow / okf_name)
+        okf_parts = Path(okf_name).parts
+        okf_top = okf_parts[0] if okf_parts else okf_name
+        if root.exists():
+            for entry in root.iterdir():
+                if entry.name in (okf_top, MANIFEST_DIR, ".git"):
+                    continue
+                (shadow / entry.name).symlink_to(entry)
+            src_okf = root / okf_name
+            if src_okf.is_dir():
+                (shadow / okf_name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(src_okf, shadow / okf_name)
+            else:
+                (shadow / okf_name).mkdir(parents=True)
+            src_state = root / MANIFEST_DIR
+            if src_state.is_dir():
+                shutil.copytree(src_state, shadow / MANIFEST_DIR)
         else:
-            (shadow / okf_name).mkdir()
-        src_state = root / MANIFEST_DIR
-        if src_state.is_dir():
-            shutil.copytree(src_state, shadow / MANIFEST_DIR)
-        for rel, content in pending.items():
-            target = shadow / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
+            (shadow / okf_name).mkdir(parents=True)
+        _apply_pending(shadow, pending)
         yield shadow
 
 
@@ -419,6 +550,71 @@ class GenerateResult(WriteOutcome):
     evidence: list[str] = field(default_factory=list)
     verification: list[str] = field(default_factory=list)
     llm: list[str] = field(default_factory=list)
+
+
+def _finalize_staged_run(
+    cfg: ChainConfig,
+    root: Path,
+    now: str,
+    command: str,
+    plan: ChainPlan,
+    out,
+    previous: Manifest | None,
+    *,
+    dry_run: bool = False,
+    fingerprint_root: Path | None = None,
+    llm_transcript: dict | None = None,
+) -> None:
+    """Stage pending writes, validate the staged tree, then atomically commit.
+
+    The real repository is untouched until staged validation passes. Manifest
+    writes are committed last so source baselines cannot advance ahead of the
+    content they describe.
+    """
+    manifest_rel: str | None = None
+    run_rels: list[str] = []
+    with _shadow_tree(root, cfg.generation.output_dir, dict(out.pending)) as shadow:
+        owned_indexes = _write_indexes(cfg, shadow, now, out, previous)
+        _apply_pending(shadow, out.pending)
+
+        manifest = _build_manifest(
+            cfg,
+            shadow,
+            now,
+            plan,
+            out,
+            previous,
+            owned_indexes,
+            fingerprint_root=fingerprint_root or root,
+        )
+        if out.content_changed() and (
+            previous is None or not manifests_equal_ignoring_run_time(previous, manifest)
+        ):
+            save_manifest(shadow, manifest)
+            out.manifest_written = True
+            manifest_rel = MANIFEST_FILE
+
+        if not dry_run:
+            run_file = _record_run(
+                cfg, shadow, now, command, plan, out, git_root=root
+            )
+            out.run_file = run_file
+            if run_file:
+                run_rels.append(run_file)
+            if llm_transcript is not None and out.content_changed():
+                path = write_json_run(shadow, now, "generate-llm", llm_transcript)
+                run_rels.append(path.relative_to(shadow).as_posix())
+
+        out.report = validate_tree(shadow, okf_dir=cfg.generation.output_dir)
+        if dry_run:
+            return
+
+        commit_rels = list(out.pending) + run_rels
+        if manifest_rel:
+            commit_rels.append(manifest_rel)
+        if commit_rels:
+            _raise_if_validation_failed(out.report)
+        _commit_staged_files(root, shadow, commit_rels)
 
 
 def run_generate(
@@ -438,6 +634,7 @@ def run_generate(
     validation status are exactly what a real run would produce.
     """
     root = Path(root).resolve()
+    _reject_unsafe_output_dir(root, cfg.generation.output_dir)
     now = now or now_stamp()
 
     plan = plan_chain_pages(cfg, root, now)
@@ -490,35 +687,18 @@ def run_generate(
             force_sections=force_by_rel.get(draft.rel_path, ()),
         )
 
-    if dry_run:
-        # Indexes are rendered from the pages on disk, and validation reads
-        # the tree — both must see this run's pages, so they run against a
-        # shadow copy with the pending writes applied.
-        with _shadow_tree(root, cfg.generation.output_dir, dict(result.pending)) as shadow:
-            owned_indexes = _write_indexes(cfg, shadow, now, result, previous)
-            manifest = _build_manifest(
-                cfg, shadow, now, plan, result, previous, owned_indexes,
-                fingerprint_root=root,
-            )
-            result.manifest_written = previous is None or not (
-                manifests_equal_ignoring_run_time(previous, manifest)
-            )
-            save_manifest(shadow, manifest)
-            result.report = validate_tree(shadow, okf_dir=cfg.generation.output_dir)
-        return result
-
-    owned_indexes = _write_indexes(cfg, root, now, result, previous)
-    manifest = _build_manifest(cfg, root, now, plan, result, previous, owned_indexes)
-    if previous is None or not manifests_equal_ignoring_run_time(previous, manifest):
-        save_manifest(root, manifest)
-        result.manifest_written = True
-
-    result.run_file = _record_run(cfg, root, now, "generate", plan, result)
-    if enrichment is not None and result.content_changed():
-        from ..storage.runs import write_json_run
-
-        write_json_run(root, now, "generate-llm", enrichment.transcript)
-    result.report = validate_tree(root, okf_dir=cfg.generation.output_dir)
+    _finalize_staged_run(
+        cfg,
+        root,
+        now,
+        "generate",
+        plan,
+        result,
+        previous,
+        dry_run=dry_run,
+        fingerprint_root=root,
+        llm_transcript=enrichment.transcript if enrichment is not None else None,
+    )
     return result
 
 
@@ -606,12 +786,11 @@ def _plan_only_assessment(
             )
 
     okf_name = cfg.generation.output_dir
-    managed = set(previous.managed_indexes)
     for rel in result.indexes_affected:
         target = root / rel
         if target.exists():
             text = target.read_text(encoding="utf-8")
-            if rel not in managed and GENERATED_MARKER not in text:
+            if not _index_is_owned_by_tool(rel, text, previous):
                 result.risks.append(
                     f"{rel} is hand-written — new/renamed pages must be "
                     "listed there manually"
@@ -641,6 +820,7 @@ def run_update(
     validation risks instead.
     """
     root = Path(root).resolve()
+    _reject_unsafe_output_dir(root, cfg.generation.output_dir)
     now = now or now_stamp()
 
     previous = load_manifest(root)
@@ -687,13 +867,14 @@ def run_update(
         if draft.rel_path not in impact.pages:
             continue  # surgical updates: untouched evidence, untouched page
         _write_page(root, draft.rel_path, draft.content, owned, result, preserve=preserve)
-    owned_indexes = _write_indexes(cfg, root, now, result, previous)
-
-    manifest = _build_manifest(cfg, root, now, plan, result, previous, owned_indexes)
-    if not manifests_equal_ignoring_run_time(previous, manifest):
-        save_manifest(root, manifest)
-        result.manifest_written = True
-
-    result.run_file = _record_run(cfg, root, now, "update", plan, result)
-    result.report = validate_tree(root, okf_dir=cfg.generation.output_dir)
+    _finalize_staged_run(
+        cfg,
+        root,
+        now,
+        "update",
+        plan,
+        result,
+        previous,
+        fingerprint_root=root,
+    )
     return result
