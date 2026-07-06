@@ -9,6 +9,7 @@ framework's Known Gaps section, matching the OKF agent behavior rules.
 from __future__ import annotations
 
 import posixpath
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -80,6 +81,37 @@ class _Ctx:
         return posixpath.relpath(raw_path, start=posixpath.join(self.okf, src_dir))
 
 
+# Known Gaps bullet text shared with the LLM pipeline (agent/llm_pipeline.py)
+# and with the merge logic in okf/sections.py: when a --use-llm run actually
+# resolves one of these deterministic gaps (e.g. by extracting a grounded
+# Core Formula, or recording a divergence that cites a table's schema), the
+# matching bullet is stripped so the page doesn't contradict itself — and
+# stays stripped across later deterministic generate/update reruns as long
+# as the grounding it depends on (a `[src: …]` citation) is still present.
+RAW_DOC_EXTRACTION_GAP = (
+    "Formulas and business definitions have not been extracted from "
+    "the ingested raw docs (LLM extraction lands in a later milestone)."
+)
+
+_BQ_CROSS_CHECK_RE = re.compile(
+    r"^Schema for `([^`]+)` is ingested but has not been cross-checked"
+)
+
+
+def bq_cross_check_gap(table: str) -> str:
+    return (
+        f"Schema for `{table}` is ingested but has not been "
+        "cross-checked against code or methodology (verification "
+        "lands in a later milestone)."
+    )
+
+
+def bq_cross_check_table(bullet_text: str) -> str | None:
+    """The table name if ``bullet_text`` is a ``bq_cross_check_gap`` bullet."""
+    match = _BQ_CROSS_CHECK_RE.match(bullet_text)
+    return match.group(1) if match else None
+
+
 def _build_ctx(cfg: ChainConfig, root: Path, now: str) -> _Ctx:
     chain = cfg.chain
     ctx = _Ctx(cfg=cfg, now=now, okf=cfg.generation.output_dir)
@@ -120,10 +152,7 @@ def _build_ctx(cfg: ChainConfig, root: Path, now: str) -> _Ctx:
     # Deterministic gap register — one entry per fact the scaffold cannot know.
     gaps = ctx.gaps
     if ctx.raw_docs_found:
-        gaps.append(
-            "Formulas and business definitions have not been extracted from "
-            "the ingested raw docs (LLM extraction lands in a later milestone)."
-        )
+        gaps.append(RAW_DOC_EXTRACTION_GAP)
     else:
         gaps.append(
             "Source methodology has not been ingested; framework scope "
@@ -163,11 +192,7 @@ def _build_ctx(cfg: ChainConfig, root: Path, now: str) -> _Ctx:
     for table, _, _ in ctx.outputs:
         schema = ctx.bq_schema(table)
         if schema is not None:
-            gaps.append(
-                f"Schema for `{table}` is ingested but has not been "
-                "cross-checked against code or methodology (verification "
-                "lands in a later milestone)."
-            )
+            gaps.append(bq_cross_check_gap(table))
         elif ctx.bq_load is not None and ctx.bq_load.available:
             gaps.append(
                 f"BigQuery table `{table}` was not found at generate time; "

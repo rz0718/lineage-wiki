@@ -23,8 +23,13 @@ from pathlib import Path
 
 from ..config import ChainConfig
 from ..constants import PRESERVED_SECTIONS
-from ..okf.sections import append_to_section, replace_section
-from ..okf.templates import ChainPlan
+from ..okf.sections import (
+    append_to_section,
+    cited_evidence_ids,
+    replace_section,
+    split_sections,
+)
+from ..okf.templates import RAW_DOC_EXTRACTION_GAP, ChainPlan, bq_cross_check_gap
 from ..providers import LLMProvider
 from .grounding import Claim, Conflict, GroundingContext
 from .prompts import (
@@ -65,6 +70,28 @@ def _headings(text: str) -> set[str]:
     return {m.group(1) for m in re.finditer(r"(?m)^## (.+?)\s*$", text)}
 
 
+def _strip_gap_bullets(content: str, texts: list[str]) -> str:
+    """Remove deterministic Known Gaps bullets this run actually resolved.
+
+    Operates on the already-rendered page text (the deterministic scaffold
+    has no memory of what the LLM pass accomplishes), matching by exact
+    bullet text so it never touches gaps it didn't specifically resolve.
+    """
+    if not texts:
+        return content
+    _, sections = split_sections(content)
+    block = next((b for h, b in sections if h == "Known Gaps"), None)
+    if block is None:
+        return content
+    heading_line, *body_lines = block.splitlines()
+    targets = {f"- {t}" for t in texts}
+    kept = [line for line in body_lines if line.strip() not in targets]
+    if kept == body_lines:
+        return content
+    body = "\n".join(kept).strip() or "None recorded."
+    return replace_section(content, "Known Gaps", body)
+
+
 @dataclass
 class PageJob:
     rel_path: str
@@ -76,7 +103,13 @@ class EnrichmentResult:
     drafts: dict[str, str] = field(default_factory=dict)  # rel -> new content
     sections_written: dict[str, list[str]] = field(default_factory=dict)
     gaps_added: list[str] = field(default_factory=list)
+    gaps_resolved: list[str] = field(default_factory=list)
     divergences: list[str] = field(default_factory=list)
+    divergence_evidence_ids: list[str] = field(default_factory=list)
+    # evidence ids actually cited in a *written and accepted* section body,
+    # keyed by "<rel_path>::<heading>" — used to gate gap resolution on
+    # published citations, not merely on accepted-but-unwritten claims.
+    section_evidence_ids: dict[str, list[str]] = field(default_factory=dict)
     rejected: list[str] = field(default_factory=list)  # human-readable reasons
     reviewer_issues: list[str] = field(default_factory=list)
     summary: list[str] = field(default_factory=list)
@@ -178,6 +211,7 @@ def _run_extractor(
                 f"- **{conflict.topic.strip()}** — {conflict.detail.strip()} "
                 f"(evidence: {cited})"
             )
+            result.divergence_evidence_ids.extend(conflict.evidence_ids)
         else:
             result.rejected.append(f"conflict {conflict.topic!r}: {decision.reason}")
     return accepted
@@ -279,6 +313,9 @@ def run_llm_enrichment(
         content = drafts[job.rel_path]
         for heading, body in accepted.items():
             content = replace_section(content, heading, body)
+            result.section_evidence_ids[f"{job.rel_path}::{heading}"] = (
+                cited_evidence_ids(body)
+            )
         drafts[job.rel_path] = content
         result.drafts[job.rel_path] = content
         result.sections_written[job.rel_path] = sorted(accepted)
@@ -287,6 +324,31 @@ def run_llm_enrichment(
     framework_rel = f"{okf}/frameworks/{cfg.chain.slug}.md"
     if framework_rel in drafts:
         content = drafts[framework_rel]
+
+        resolved: list[str] = []
+        core_formula_ids = result.section_evidence_ids.get(
+            f"{framework_rel}::Core Formula", []
+        )
+        if any(ctx.types.get(e) == "raw_doc" for e in core_formula_ids):
+            resolved.append(RAW_DOC_EXTRACTION_GAP)
+
+        # Only tables a *published* citation (a written section, not merely
+        # an accepted-but-unwritten claim) or a recorded divergence actually
+        # cross-checked — an accepted claim that never made it into a
+        # section must not silently resolve the gap.
+        written_ids = [e for ids in result.section_evidence_ids.values() for e in ids]
+        bq_tables_addressed = {
+            e.split(":", 1)[1]
+            for e in written_ids + result.divergence_evidence_ids
+            if e.startswith("bq-schema:")
+        }
+        resolved.extend(bq_cross_check_gap(t) for t in sorted(bq_tables_addressed))
+        if resolved:
+            new_content = _strip_gap_bullets(content, resolved)
+            if new_content != content:
+                result.gaps_resolved.extend(resolved)
+                content = new_content
+
         if result.gaps_added and cfg.generation.mark_unknowns_as_gaps:
             # The (llm) prefix marks these bullets so later deterministic
             # rewrites carry them over (see sections.LLM_GAP_PREFIX).
@@ -315,6 +377,7 @@ def run_llm_enrichment(
         ),
         f"divergences recorded: {len(result.divergences)}",
         f"gaps added from rejected formulas: {len(result.gaps_added)}",
+        f"gaps resolved: {len(result.gaps_resolved)}",
     ]
     if result.reviewer_issues:
         result.summary.append(
@@ -329,6 +392,7 @@ def run_llm_enrichment(
         "reviewer_issues": list(result.reviewer_issues),
         "divergences": list(result.divergences),
         "gaps_added": list(result.gaps_added),
+        "gaps_resolved": list(result.gaps_resolved),
         "sections_written": dict(result.sections_written),
     }
     return result

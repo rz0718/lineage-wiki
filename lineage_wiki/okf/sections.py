@@ -18,6 +18,7 @@ import difflib
 import re
 
 from ..constants import PRESERVED_SECTIONS
+from .templates import RAW_DOC_EXTRACTION_GAP, bq_cross_check_table
 
 _SECTION_HEAD = re.compile(r"(?m)^## (.+?)\s*$")
 
@@ -85,6 +86,48 @@ def _merge_gap_block(existing_block: str, draft_block: str) -> str:
     return draft_block.rstrip("\n") + "\n" + "\n".join(carried) + "\n"
 
 
+def _reconcile_gap_bullets(merged: dict[str, str]) -> str:
+    """Drop deterministic Known Gaps bullets that the page's own merged
+    content shows as already resolved this run — a grounded Core Formula
+    citation, or a recorded divergence citing a table's BigQuery schema —
+    so the page never simultaneously claims "not extracted yet" next to an
+    extracted, cited Core Formula. Bullets reappear automatically once the
+    citation they depend on is gone (e.g. the section was invalidated and
+    reverted to scaffold), since that's re-derived from the merged content
+    every time, not tracked as separate state."""
+    block = merged.get("Known Gaps", "")
+    lines = block.splitlines()
+    if not lines:
+        return block
+    heading_line, *body_lines = lines
+
+    formula_grounded = CITATION_MARK in merged.get("Core Formula", "")
+    # Divergences cite evidence as backtick-wrapped ids ("evidence: `id`"),
+    # not the `[src: id]` marker prose sections use — check both forms.
+    evidence_text = merged.get("Core Formula", "") + merged.get(
+        "Known Doc-vs-Code Divergences", ""
+    )
+
+    kept = []
+    for line in body_lines:
+        text = line.strip()
+        if text.startswith("- "):
+            text = text[2:]
+        if formula_grounded and text == RAW_DOC_EXTRACTION_GAP:
+            continue
+        table = bq_cross_check_table(text)
+        if table is not None and (
+            f"`bq-schema:{table}`" in evidence_text
+            or f"[src: bq-schema:{table}]" in evidence_text
+        ):
+            continue
+        kept.append(line)
+    if kept == body_lines:
+        return block
+    body = "\n".join(kept).strip() or "None recorded."
+    return f"{heading_line}\n\n{body}\n"
+
+
 def _invalidation_note(stale_ids: list[str]) -> str:
     cited = ", ".join(f"`{e}`" for e in stale_ids)
     return (
@@ -113,7 +156,9 @@ def merge_manual_sections(
       this run), in which case the section reverts to the draft body plus a
       visible invalidation note, and ``(heading, stale_ids)`` is appended to
       ``invalidated`` when provided;
-    - ``Known Gaps`` keeps ``- (llm)`` bullets from previous LLM runs;
+    - ``Known Gaps`` keeps ``- (llm)`` bullets from previous LLM runs, and
+      drops the deterministic bullets that the page's own merged content
+      (e.g. a grounded Core Formula citation) shows as already resolved;
     - sections present only in ``existing`` are retained (appended after
       the draft's sections, in their original order).
     """
@@ -125,29 +170,35 @@ def merge_manual_sections(
         existing_by_heading.setdefault(heading, block)
     draft_headings = {heading for heading, _ in draft_sections}
 
-    parts = [draft_prelude]
+    order: list[str] = []
+    merged: dict[str, str] = {}
     for heading, block in draft_sections:
         old = existing_by_heading.get(heading)
         if heading in force or old is None:
-            parts.append(block)
+            body = block
         elif heading in preserved:
-            parts.append(old)
+            body = old
         elif heading == "Known Gaps":
-            parts.append(_merge_gap_block(old, block))
+            body = _merge_gap_block(old, block)
         elif CITATION_MARK in old and CITATION_MARK not in block:
             stale_ids = _stale_cited(old, stale_evidence)
             if stale_ids:
                 # The evidence this content cites changed: stale LLM prose
                 # must not survive under a valid-looking citation.
-                parts.append(
-                    block.rstrip("\n") + "\n\n" + _invalidation_note(stale_ids) + "\n"
-                )
+                body = block.rstrip("\n") + "\n\n" + _invalidation_note(stale_ids) + "\n"
                 if invalidated is not None:
                     invalidated.append((heading, stale_ids))
             else:
-                parts.append(old)
+                body = old
         else:
-            parts.append(block)
+            body = block
+        order.append(heading)
+        merged[heading] = body
+
+    if "Known Gaps" in merged:
+        merged["Known Gaps"] = _reconcile_gap_bullets(merged)
+
+    parts = [draft_prelude] + [merged[heading] for heading in order]
     for heading, block in existing_sections:
         if heading not in draft_headings:
             parts.append(block)
