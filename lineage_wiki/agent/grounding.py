@@ -5,15 +5,14 @@ OKF page unless it passes these checks, which are plain Python over the
 loaded evidence bundle — the model is never trusted to verify itself:
 
 - every claim must cite at least one known EvidenceItem id;
-- ``formula`` claims must cite doc/code/note evidence and carry a verbatim
-  quote found in the cited evidence — otherwise they become Known Gaps;
+- ``formula``, ``definition``, ``mapping``, and ``fact`` claims must carry
+  a verbatim quote found in the cited evidence — otherwise they are rejected;
 - ``column`` claims must cite BigQuery schema evidence and name a real
   column from the cited schema;
 - ``code_path`` claims must cite loaded repo-file evidence;
-- conflicts must cite known evidence and become Known Doc-vs-Code
-  Divergences;
-- written sections must cite accepted evidence via ``[src: <id>]`` markers
-  and must not contain SQL.
+- conflicts must cite known evidence on both sides and carry verbatim quotes;
+- written sections must cite accepted evidence via ``[src: <id>]`` markers,
+  trace those citations to accepted claim text/quotes, and must not contain SQL.
 """
 
 from __future__ import annotations
@@ -27,6 +26,7 @@ CLAIM_KINDS = ("formula", "definition", "column", "code_path", "mapping", "fact"
 
 # Evidence types acceptable as the source of a formula.
 _FORMULA_SOURCES = ("raw_doc", "local_repo", "human_note")
+_NATURAL_LANGUAGE_KINDS = {"definition", "mapping", "fact"}
 
 _SRC_MARKER = re.compile(r"\[src:\s*([^\]\s]+)\s*\]")
 _SQL_FENCE = re.compile(r"(?is)```sql")
@@ -52,6 +52,7 @@ class Claim:
             "kind": self.kind,
             "text": self.text,
             "evidence_ids": list(self.evidence_ids),
+            "quote": self.quote,
         }
 
 
@@ -60,6 +61,7 @@ class Conflict:
     topic: str
     detail: str
     evidence_ids: list[str] = field(default_factory=list)
+    quotes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -99,6 +101,18 @@ class GroundingContext:
             return self._check_column(claim)
         if claim.kind == "code_path":
             return self._check_code_path(claim)
+        if claim.kind in _NATURAL_LANGUAGE_KINDS:
+            return self._check_quoted_claim(claim)
+        return Decision(True)
+
+    def _quote_in_cited_evidence(
+        self, quote: str, evidence_ids: list[str], *, label: str
+    ) -> Decision:
+        normalized = _normalized(quote)
+        if not normalized:
+            return Decision(False, f"{label} has no supporting quote")
+        if not any(normalized in self.contents[e] for e in evidence_ids):
+            return Decision(False, f"{label} quote not found in the cited evidence")
         return Decision(True)
 
     def _check_formula(self, claim: Claim) -> Decision:
@@ -109,12 +123,14 @@ class GroundingContext:
                 "formula cites no methodology/code/note evidence "
                 f"(needs one of: {', '.join(_FORMULA_SOURCES)})",
             )
-        quote = _normalized(claim.quote)
-        if not quote:
-            return Decision(False, "formula has no supporting quote")
-        if not any(quote in self.contents[e] for e in sources):
-            return Decision(False, "formula quote not found in the cited evidence")
-        return Decision(True)
+        return self._quote_in_cited_evidence(
+            claim.quote, sources, label="formula"
+        )
+
+    def _check_quoted_claim(self, claim: Claim) -> Decision:
+        return self._quote_in_cited_evidence(
+            claim.quote, claim.evidence_ids, label=claim.kind
+        )
 
     def _check_column(self, claim: Claim) -> Decision:
         schema_ids = [e for e in claim.evidence_ids if e in self.bq_columns]
@@ -146,12 +162,22 @@ class GroundingContext:
             e not in self.known_ids for e in conflict.evidence_ids
         ):
             return Decision(False, "conflict cites unknown or no evidence ids")
+        if len(set(conflict.evidence_ids)) < 2:
+            return Decision(False, "conflict must cite evidence on both sides")
+        if not conflict.quotes:
+            return Decision(False, "conflict has no supporting quotes")
+        for quote in conflict.quotes:
+            decision = self._quote_in_cited_evidence(
+                quote, conflict.evidence_ids, label="conflict"
+            )
+            if not decision.accepted:
+                return decision
         return Decision(True)
 
     # --- written sections -----------------------------------------------------
 
     def check_section_body(
-        self, body: str, accepted_evidence_ids: set[str]
+        self, body: str, accepted_claims: list[Claim]
     ) -> Decision:
         if not body.strip():
             return Decision(False, "empty section body")
@@ -162,10 +188,23 @@ class GroundingContext:
         cited = _SRC_MARKER.findall(body)
         if not cited:
             return Decision(False, "no [src: <evidence-id>] citation markers")
+        accepted_evidence_ids = {e for c in accepted_claims for e in c.evidence_ids}
         bad = [c for c in cited if c not in accepted_evidence_ids]
         if bad:
             return Decision(
                 False,
                 "cites evidence outside the accepted claims: " + ", ".join(bad),
             )
+        body_text = _normalized(_SRC_MARKER.sub("", body))
+        for evidence_id in sorted(set(cited)):
+            claims = [c for c in accepted_claims if evidence_id in c.evidence_ids]
+            if not any(
+                _normalized(c.text) in body_text
+                or (_normalized(c.quote) and _normalized(c.quote) in body_text)
+                for c in claims
+            ):
+                return Decision(
+                    False,
+                    f"citation {evidence_id} is not traceable to an accepted claim",
+                )
         return Decision(True)

@@ -168,7 +168,11 @@ def _bundle() -> EvidenceBundle:
         source_type="raw_doc",
         source_uri="raw_files/example/methodology.md",
         title="Methodology",
-        content="# Methodology\n\nTotal value = quantity * price\n",
+        content=(
+            "# Methodology\n\n"
+            "Total value = quantity * price\n"
+            "The daily snapshot pipeline is covered by this method.\n"
+        ),
     )
     bundle = EvidenceBundle(raw_docs=[doc])
     schema = TableSchema(
@@ -188,12 +192,39 @@ def _bundle() -> EvidenceBundle:
 
 def test_claims_must_cite_known_evidence():
     ctx = GroundingContext(_bundle())
-    ok = ctx.check_claim(Claim(id="c", kind="fact", text="x", evidence_ids=[RAW_DOC_ID]))
+    ok = ctx.check_claim(
+        Claim(
+            id="c",
+            kind="fact",
+            text="The daily snapshot pipeline is covered by this method.",
+            evidence_ids=[RAW_DOC_ID],
+            quote="daily snapshot pipeline is covered",
+        )
+    )
     assert ok.accepted
     bad = ctx.check_claim(Claim(id="c", kind="fact", text="x", evidence_ids=["nope"]))
     assert not bad.accepted and "unknown evidence ids" in bad.reason
     none = ctx.check_claim(Claim(id="c", kind="fact", text="x"))
     assert not none.accepted
+
+
+def test_natural_language_claims_require_verbatim_quote_in_cited_source():
+    ctx = GroundingContext(_bundle())
+    missing_quote = ctx.check_claim(
+        Claim(id="f1", kind="fact", text="Covered by the method.", evidence_ids=[RAW_DOC_ID])
+    )
+    assert not missing_quote.accepted and "no supporting quote" in missing_quote.reason
+
+    fabricated = ctx.check_claim(
+        Claim(
+            id="f2",
+            kind="fact",
+            text="Unsupported fact with a valid-looking citation.",
+            evidence_ids=[RAW_DOC_ID],
+            quote="this quote does not appear",
+        )
+    )
+    assert not fabricated.accepted and "quote not found" in fabricated.reason
 
 
 def test_formula_requires_verbatim_quote_in_cited_source():
@@ -253,29 +284,67 @@ def test_code_path_claims_require_repo_evidence():
 def test_conflicts_require_known_evidence():
     ctx = GroundingContext(_bundle())
     ok = ctx.check_conflict(
-        Conflict(topic="Fee handling", detail="doc vs schema",
-                 evidence_ids=[RAW_DOC_ID, SCHEMA_ID])
+        Conflict(
+            topic="Formula wording",
+            detail="doc vs schema",
+            evidence_ids=[RAW_DOC_ID, SCHEMA_ID],
+            quotes=["Total value = quantity * price", "total_value"],
+        )
     )
     assert ok.accepted
     bad = ctx.check_conflict(Conflict(topic="x", detail="y", evidence_ids=["nope"]))
     assert not bad.accepted
+    unquoted = ctx.check_conflict(
+        Conflict(topic="x", detail="y", evidence_ids=[RAW_DOC_ID, SCHEMA_ID])
+    )
+    assert not unquoted.accepted and "supporting quotes" in unquoted.reason
+    fabricated = ctx.check_conflict(
+        Conflict(
+            topic="x",
+            detail="y",
+            evidence_ids=[RAW_DOC_ID, SCHEMA_ID],
+            quotes=["not in any cited evidence"],
+        )
+    )
+    assert not fabricated.accepted and "quote not found" in fabricated.reason
 
 
 def test_section_bodies_must_cite_and_must_not_contain_sql():
     ctx = GroundingContext(_bundle())
-    accepted_ids = {RAW_DOC_ID, SCHEMA_ID}
-    ok = ctx.check_section_body(f"Grounded text. [src: {RAW_DOC_ID}]", accepted_ids)
+    accepted_claims = [
+        Claim(
+            id="f1",
+            kind="formula",
+            text="total_value = quantity * price",
+            evidence_ids=[RAW_DOC_ID],
+            quote="Total value = quantity * price",
+        ),
+        Claim(
+            id="c1",
+            kind="column",
+            text="Column total_value holds the product.",
+            evidence_ids=[SCHEMA_ID],
+        ),
+    ]
+    ok = ctx.check_section_body(
+        f"`total_value = quantity * price` [src: {RAW_DOC_ID}]", accepted_claims
+    )
     assert ok.accepted
-    uncited = ctx.check_section_body("Plain assertion.", accepted_ids)
+    uncited = ctx.check_section_body("Plain assertion.", accepted_claims)
     assert not uncited.accepted and "citation markers" in uncited.reason
-    foreign = ctx.check_section_body("Text. [src: other-id]", accepted_ids)
+    foreign = ctx.check_section_body("Text. [src: other-id]", accepted_claims)
     assert not foreign.accepted and "outside the accepted claims" in foreign.reason
+    unsupported = ctx.check_section_body(
+        f"Valid-looking but unrelated assertion. [src: {RAW_DOC_ID}]",
+        accepted_claims,
+    )
+    assert not unsupported.accepted and "not traceable" in unsupported.reason
     sql_fence = ctx.check_section_body(
-        f"```sql\nSELECT 1\n```\n[src: {RAW_DOC_ID}]", accepted_ids
+        f"```sql\nSELECT 1\n```\n[src: {RAW_DOC_ID}]", accepted_claims
     )
     assert not sql_fence.accepted and "SQL is not allowed" in sql_fence.reason
     sql_inline = ctx.check_section_body(
-        f"Run select x from t daily. [src: {RAW_DOC_ID}]", accepted_ids
+        f"Run select x from t daily. [src: {RAW_DOC_ID}]", accepted_claims
     )
     assert not sql_inline.accepted
 
@@ -287,7 +356,11 @@ def _setup_target(tmp_path, monkeypatch) -> Path:
     doc = tmp_path / "raw_files" / "example" / "methodology.md"
     doc.parent.mkdir(parents=True)
     doc.write_text(
-        "# Example Methodology\n\nTotal value = quantity * price\n",
+        (
+            "# Example Methodology\n\n"
+            "This methodology covers the daily example metric snapshot pipeline.\n\n"
+            "Total value = quantity * price\n"
+        ),
         encoding="utf-8",
     )
     monkeypatch.setenv("LINEAGE_WIKI_BQ_FIXTURES", str(BQ_FIXTURES))
@@ -302,19 +375,19 @@ def test_generate_use_llm_end_to_end(tmp_path, monkeypatch):
         ["generate", "--config", str(EXAMPLE_CONFIG), "--root", str(root), "--use-llm"],
     )
     assert result.exit_code == 0, result.output
-    assert "llm       claims accepted: 2, rejected: 3" in result.output
+    assert "llm       claims accepted: 3, rejected: 3" in result.output
 
     framework = (root / "okf" / "frameworks" / "example-chain.md").read_text(
         encoding="utf-8"
     )
     # Accepted, cited sections were written.
-    assert "Covers the daily example metric snapshot pipeline. [src: " in framework
+    assert "daily example metric snapshot pipeline. [src: " in framework
     assert "`total_value = quantity * price` [src: " in framework
     # The rejected formula became a Known Gap instead of being published.
     assert "- (llm) A proposed formula (profit = revenue - cost) was rejected" in framework
     assert "profit = revenue - cost\n" not in framework.split("## Known Gaps")[0]
     # The accepted conflict became a Known Doc-vs-Code Divergence.
-    assert "**Fee handling**" in framework
+    assert "**Formula wording**" in framework
     # The model's attempt to write Known Gaps directly was blocked.
     assert "The model must not write this section." not in framework
 
@@ -329,7 +402,7 @@ def test_generate_use_llm_end_to_end(tmp_path, monkeypatch):
     run_files = sorted((root / ".lineage-wiki" / "runs").glob("*generate-llm.json"))
     assert run_files, "generate-llm transcript missing"
     transcript = json.loads(run_files[-1].read_text(encoding="utf-8"))
-    assert len(transcript["claims_accepted"]) == 2
+    assert len(transcript["claims_accepted"]) == 3
     assert any("SQL is not allowed" in r for r in transcript["rejected"])
     assert any("not in the allowed list" in r for r in transcript["rejected"])
 
@@ -362,7 +435,7 @@ def test_dry_run_with_llm_writes_nothing(tmp_path, monkeypatch):
         ],
     )
     assert result.exit_code == 0, result.output
-    assert "llm       claims accepted: 2" in result.output
+    assert "llm       claims accepted: 3" in result.output
     assert not (root / "okf").exists()
     assert not (root / ".lineage-wiki").exists()
 

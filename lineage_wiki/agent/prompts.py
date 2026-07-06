@@ -118,6 +118,7 @@ def extractor_prompt(prompts: PromptSet, items: list[EvidenceItem]) -> str:
                 "topic": "<what disagrees>",
                 "detail": "<doc says X, code/schema says Y>",
                 "evidence_ids": ["<ids on both sides>"],
+                "quotes": ["<verbatim supporting excerpts from the cited evidence>"],
             }
         ],
     }

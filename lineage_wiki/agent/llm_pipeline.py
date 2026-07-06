@@ -169,6 +169,7 @@ def _run_extractor(
             topic=str(entry.get("topic", "")),
             detail=str(entry.get("detail", "")),
             evidence_ids=[str(e) for e in entry.get("evidence_ids", [])],
+            quotes=[str(q) for q in entry.get("quotes", [])],
         )
         decision = ctx.check_conflict(conflict)
         if decision.accepted:
@@ -194,8 +195,6 @@ def _run_writer_and_reviewer(
 ) -> dict[str, str]:
     """Returns accepted {heading: body} for one page."""
     claims_payload = [c.payload() for c in claims]
-    accepted_evidence = {e for c in claims for e in c.evidence_ids}
-
     raw = _complete(
         provider,
         prompts,
@@ -216,7 +215,7 @@ def _run_writer_and_reviewer(
                 f"{job.rel_path}: section {heading!r} was not in the allowed list"
             )
             continue
-        decision = ctx.check_section_body(body, accepted_evidence)
+        decision = ctx.check_section_body(body, claims)
         if not decision.accepted:
             result.rejected.append(
                 f"{job.rel_path}: section {heading!r} rejected — {decision.reason}"

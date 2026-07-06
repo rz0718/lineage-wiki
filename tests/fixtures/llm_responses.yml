@@ -12,6 +12,7 @@
 # the deterministic grounding layer's behavior is visible:
 # - claim c1 (formula, quote present in the raw doc)      -> accepted
 # - claim c2 (column, backed by ingested BQ schema)       -> accepted
+# - claim c6 (fact, quote present in the raw doc)         -> accepted
 # - claim c3 (formula, quote NOT in the evidence)         -> rejected, Known Gap
 # - claim c4 (fact citing an unknown evidence id)         -> rejected
 # - claim c5 (code_path with no repo-file evidence)       -> rejected
@@ -47,19 +48,24 @@ responses:
        "evidence_ids": ["raw-doc:does-not-exist.md"], "quote": ""},
       {"id": "c5", "kind": "code_path",
        "text": "Computed in pipeline.py",
-       "evidence_ids": ["raw-doc:raw_files/example/methodology.md"], "quote": ""}
+       "evidence_ids": ["raw-doc:raw_files/example/methodology.md"], "quote": ""},
+      {"id": "c6", "kind": "fact",
+       "text": "This methodology covers the daily example metric snapshot pipeline.",
+       "evidence_ids": ["raw-doc:raw_files/example/methodology.md"],
+       "quote": "covers the daily example metric snapshot pipeline"}
     ],
     "conflicts": [
-      {"topic": "Fee handling",
-       "detail": "The methodology says fees are included in total_value, but the ingested schema has no fee column.",
+      {"topic": "Formula wording",
+       "detail": "The methodology defines total value in prose while the schema exposes total_value as the output column.",
        "evidence_ids": ["raw-doc:raw_files/example/methodology.md",
-                        "bq-schema:example-project.analytics.example_daily_snapshot"]}
+                        "bq-schema:example-project.analytics.example_daily_snapshot"],
+       "quotes": ["Total value = quantity * price", "total_value"]}
     ]}
   writer:
     "okf/frameworks/example-chain.md": |
       {"sections": [
         {"heading": "Scope",
-         "body": "Covers the daily example metric snapshot pipeline. [src: raw-doc:raw_files/example/methodology.md]"},
+         "body": "This methodology covers the daily example metric snapshot pipeline. [src: raw-doc:raw_files/example/methodology.md]"},
         {"heading": "Core Formula",
          "body": "`total_value = quantity * price` [src: raw-doc:raw_files/example/methodology.md]"},
         {"heading": "Known Gaps",

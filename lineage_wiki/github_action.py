@@ -1,7 +1,7 @@
 """Scheduled GitHub Action scaffolding (`init --github-action`).
 
 Renders ``.github/workflows/lineage-wiki-update.yml``: a daily run that
-installs the tool, applies `lineage-wiki update` for every chain config,
+installs the tool, applies `lineage-wiki update` for one configured chain,
 validates the catalog, and opens a pull request only when OKF content
 actually changed (update runs are strict no-ops otherwise, so quiet days
 produce no branch, no commit, and no PR).
@@ -45,6 +45,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Optional model-provider keys, read at run time and never stored.
+      # Change this if your generated manifest belongs to another chain config.
+      LINEAGE_WIKI_CONFIG: chains/example.yml
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       GCP_SA_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
@@ -72,12 +74,10 @@ jobs:
 
       - name: Update OKF pages from configured sources
         run: |
-          shopt -s nullglob
-          for config in chains/*.yml; do
-            echo "::group::lineage-wiki update --config $config"
-            lineage-wiki update --config "$config"
-            echo "::endgroup::"
-          done
+          test -f "$LINEAGE_WIKI_CONFIG"
+          echo "::group::lineage-wiki update --config $LINEAGE_WIKI_CONFIG"
+          lineage-wiki update --config "$LINEAGE_WIKI_CONFIG"
+          echo "::endgroup::"
 
       - name: Validate the knowledge graph
         run: lineage-wiki validate

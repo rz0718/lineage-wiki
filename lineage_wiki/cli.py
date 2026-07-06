@@ -259,6 +259,8 @@ def update(
         typer.echo("git context:")
         for line in result.git_context:
             typer.echo(f"  - {line}")
+    for warning in result.warnings:
+        typer.secho(f"warning   {warning}", fg=typer.colors.YELLOW)
 
     if result.noop:
         typer.secho(

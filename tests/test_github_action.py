@@ -45,8 +45,10 @@ def test_workflow_is_valid_yaml_with_required_steps():
 
     assert by_name["Install Python"]["uses"].startswith("actions/setup-python@")
     assert 'pip install "lineage-wiki[bigquery]"' in by_name["Install lineage-wiki"]["run"]
+    assert job["env"]["LINEAGE_WIKI_CONFIG"] == "chains/example.yml"
     update_run = by_name["Update OKF pages from configured sources"]["run"]
-    assert "chains/*.yml" in update_run and "lineage-wiki update --config" in update_run
+    assert "chains/*.yml" not in update_run and "for config in" not in update_run
+    assert 'lineage-wiki update --config "$LINEAGE_WIKI_CONFIG"' in update_run
     assert by_name["Validate the knowledge graph"]["run"] == "lineage-wiki validate"
 
     pr = by_name["Open a pull request with the updates"]

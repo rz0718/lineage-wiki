@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -31,6 +32,12 @@ from ..config import ChainConfig, RepoSource
 from ..storage.manifest import RepoFingerprint, SourceFingerprints
 
 MISSING = "missing"
+
+
+@dataclass
+class FingerprintComputation:
+    fingerprints: SourceFingerprints
+    warnings: list[str] = field(default_factory=list)
 
 
 def sha_bytes(data: bytes) -> str:
@@ -83,24 +90,52 @@ def fingerprint_repo(root: Path, repo: RepoSource) -> RepoFingerprint:
     return fingerprint
 
 
-def fingerprint_bigquery(source) -> dict[str, str]:
+def fingerprint_bigquery(
+    source, previous: dict[str, str] | None = None
+) -> tuple[dict[str, str], list[str]]:
     # Imported here: the connector imports config/evidence, and connectors
     # already import this module for sha_bytes/git_head.
     from ..connectors.bigquery_connector import load_bigquery_schemas
 
     fingerprints = {table: _sha_obj(f"config:{table}") for table in source.tables}
     load = load_bigquery_schemas(source, enforce_required=False)
+    if not load.available:
+        preserved = []
+        if previous:
+            for table in source.tables:
+                if table in previous:
+                    fingerprints[table] = previous[table]
+                    preserved.append(table)
+        warning = (
+            "BigQuery unavailable"
+            + (f" ({load.unavailable_reason})" if load.unavailable_reason else "")
+            + "; preserved prior schema fingerprints for "
+            + (
+                ", ".join(f"`{table}`" for table in preserved)
+                if preserved
+                else "0 table(s)"
+            )
+        )
+        return fingerprints, [warning]
     for table, schema in load.schemas.items():
         fingerprints[table] = schema.fingerprint()
-    return fingerprints
+    return fingerprints, []
 
 
-def compute_fingerprints(cfg: ChainConfig, root: str | Path) -> SourceFingerprints:
+def compute_fingerprint_result(
+    cfg: ChainConfig,
+    root: str | Path,
+    previous: SourceFingerprints | None = None,
+) -> FingerprintComputation:
     root = Path(root)
     bigquery = {}
+    warnings = []
     if cfg.sources.bigquery and cfg.sources.bigquery.tables:
-        bigquery = fingerprint_bigquery(cfg.sources.bigquery)
-    return SourceFingerprints(
+        bigquery, warnings = fingerprint_bigquery(
+            cfg.sources.bigquery,
+            previous.bigquery if previous is not None else None,
+        )
+    return FingerprintComputation(SourceFingerprints(
         repos={repo.name: fingerprint_repo(root, repo) for repo in cfg.sources.repos},
         bigquery=bigquery,
         raw_docs={doc.path: fingerprint_raw_doc(root, doc.path) for doc in cfg.sources.raw_docs},
@@ -111,4 +146,12 @@ def compute_fingerprints(cfg: ChainConfig, root: str | Path) -> SourceFingerprin
         config=_sha_obj(
             cfg.model_dump(exclude={"model", "validation", "bigquery_verification"})
         ),
-    )
+    ), warnings)
+
+
+def compute_fingerprints(
+    cfg: ChainConfig,
+    root: str | Path,
+    previous: SourceFingerprints | None = None,
+) -> SourceFingerprints:
+    return compute_fingerprint_result(cfg, root, previous).fingerprints

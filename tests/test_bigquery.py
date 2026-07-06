@@ -22,6 +22,7 @@ from lineage_wiki.connectors.bigquery_connector import (
 )
 from lineage_wiki.ingestion.fingerprints import compute_fingerprints
 from lineage_wiki.ingestion.source_loader import load_sources
+from lineage_wiki.storage.manifest import load_manifest
 
 from .conftest import FIXED_NOW, REPO_ROOT
 
@@ -338,3 +339,29 @@ def test_update_reacts_to_schema_change_and_noops_otherwise(
     assert "okf/outputs/example-daily-snapshot.md" in result.updated
     output = (wiki_root / "okf" / "outputs" / "example-daily-snapshot.md").read_text()
     assert "| `hedge_value` | NUMERIC | NULLABLE | Hedged value. |" in output
+
+
+def test_update_preserves_schema_docs_when_optional_bigquery_is_unavailable(
+    example_cfg, wiki_root, monkeypatch
+):
+    monkeypatch.setenv("LINEAGE_WIKI_BQ_FIXTURES", str(FIXTURES))
+    run_generate(example_cfg, wiki_root, now=FIXED_NOW)
+
+    output = wiki_root / "okf" / "outputs" / "example-daily-snapshot.md"
+    before_output = output.read_text(encoding="utf-8")
+    before_manifest = load_manifest(wiki_root)
+    assert before_manifest is not None
+    before_fingerprints = dict(before_manifest.source_fingerprints.bigquery)
+    assert before_fingerprints[SNAPSHOT_TABLE].startswith("sha256:")
+
+    monkeypatch.delenv("LINEAGE_WIKI_BQ_FIXTURES")
+    result = run_update(example_cfg, wiki_root, now=FIXED_NOW)
+
+    assert result.noop is True
+    assert result.changes.bigquery == []
+    assert result.warnings
+    assert "BigQuery unavailable" in result.warnings[0]
+    assert output.read_text(encoding="utf-8") == before_output
+    after_manifest = load_manifest(wiki_root)
+    assert after_manifest is not None
+    assert after_manifest.source_fingerprints.bigquery == before_fingerprints

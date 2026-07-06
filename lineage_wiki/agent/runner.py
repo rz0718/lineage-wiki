@@ -25,7 +25,7 @@ from ..constants import (
     PROMPT_STUBS,
 )
 from ..examples import EXAMPLE_CHAIN_YAML
-from ..ingestion.fingerprints import compute_fingerprints
+from ..ingestion.fingerprints import compute_fingerprint_result, compute_fingerprints
 from ..ingestion.git_context import GitContext, collect_git_context
 from ..ingestion.source_loader import EvidenceBundle
 from ..okf.indexes import build_all_indexes
@@ -389,7 +389,11 @@ def _build_manifest(
         generated_files=generated_files,
         managed_indexes=managed_indexes,
         file_snapshots=compute_file_snapshots(contents),
-        source_fingerprints=compute_fingerprints(cfg, fingerprint_root or root),
+        source_fingerprints=compute_fingerprints(
+            cfg,
+            fingerprint_root or root,
+            previous.source_fingerprints if previous is not None else None,
+        ),
         last_run_at=now,
         last_content_snapshot=compute_snapshot(contents),
         okf_git_head=okf_git_head(fingerprint_root or root),
@@ -719,6 +723,7 @@ class UpdateResult(WriteOutcome):
     manifest_written: bool = False
     run_file: str | None = None
     report: ValidationReport | None = None
+    warnings: list[str] = field(default_factory=list)
 
 
 def _collect_repo_contexts(
@@ -834,9 +839,16 @@ def run_update(
             f"{cfg.chain.id!r} — multi-chain manifests land in a later milestone"
         )
 
-    current = compute_fingerprints(cfg, root)
+    fingerprint_result = compute_fingerprint_result(
+        cfg, root, previous.source_fingerprints
+    )
+    current = fingerprint_result.fingerprints
     changes = diff_fingerprints(previous.source_fingerprints, current)
-    result = UpdateResult(changes=changes, plan_only=plan_only)
+    result = UpdateResult(
+        changes=changes,
+        plan_only=plan_only,
+        warnings=fingerprint_result.warnings,
+    )
 
     okf_context = collect_git_context(
         root, label="okf repo", baseline=previous.okf_git_head
