@@ -9,12 +9,24 @@ from lineage_wiki.okf.sections import (
     cited_evidence_ids,
     merge_manual_sections,
 )
+from lineage_wiki.okf.templates import RAW_DOC_EXTRACTION_GAP, bq_cross_check_gap
 from lineage_wiki.storage.manifest import SourceChanges
 
 from .conftest import EXAMPLE_CONFIG, FIXED_NOW
 from .test_llm import RAW_DOC_ID, _setup_target
 
 LATER = "2026-07-07T00:00:00Z"
+
+TABLE = "proj.ds.tbl"
+GAP_PAGE_DRAFT = (
+    "---\ntype: Framework\n---\n# Page\n\n"
+    "## Core Formula\n\nScaffold formula.\n\n"
+    "## Known Doc-vs-Code Divergences\n\nNone recorded yet.\n\n"
+    "## Known Gaps\n\n"
+    f"- {RAW_DOC_EXTRACTION_GAP}\n"
+    f"- {bq_cross_check_gap(TABLE)}\n"
+    "- Some unrelated gap.\n"
+)
 
 EXISTING_PAGE = (
     "---\ntype: Framework\n---\n# Page\n\n"
@@ -77,6 +89,89 @@ def test_merge_prefix_matching_for_repo_evidence():
     assert invalidated == [("Core Formula", ["local-repo:pipeline:main.py"])]
 
 
+# --- unit: Known Gaps reconciliation against the page's own merged content -------
+
+
+def test_merge_drops_raw_doc_gap_when_formula_grounded_in_raw_doc():
+    existing = (
+        "---\ntype: Framework\n---\n# Page\n\n"
+        "## Core Formula\n\n`x = y` [src: raw-doc:docs/a.md]\n\n"
+        "## Known Doc-vs-Code Divergences\n\nNone recorded yet.\n\n"
+        "## Known Gaps\n\n"
+        f"- {RAW_DOC_EXTRACTION_GAP}\n"
+        f"- {bq_cross_check_gap(TABLE)}\n"
+        "- Some unrelated gap.\n"
+    )
+    merged = merge_manual_sections(existing, GAP_PAGE_DRAFT)
+    assert RAW_DOC_EXTRACTION_GAP not in merged
+    assert "Some unrelated gap." in merged  # untouched gaps survive
+
+
+def test_merge_keeps_raw_doc_gap_when_formula_grounded_in_code_not_raw_doc():
+    """A formula claim may cite local_repo or human_note evidence — that
+    doesn't resolve "not extracted from raw docs" (the exact false-positive
+    a review pass on this logic flagged)."""
+    existing = (
+        "---\ntype: Framework\n---\n# Page\n\n"
+        "## Core Formula\n\n`x = y` [src: local-repo:pipeline:main.py]\n\n"
+        "## Known Doc-vs-Code Divergences\n\nNone recorded yet.\n\n"
+        "## Known Gaps\n\n"
+        f"- {RAW_DOC_EXTRACTION_GAP}\n"
+        "- Some unrelated gap.\n"
+    )
+    draft = (
+        "---\ntype: Framework\n---\n# Page\n\n"
+        "## Core Formula\n\nScaffold formula.\n\n"
+        "## Known Doc-vs-Code Divergences\n\nNone recorded yet.\n\n"
+        "## Known Gaps\n\n"
+        f"- {RAW_DOC_EXTRACTION_GAP}\n"
+        "- Some unrelated gap.\n"
+    )
+    merged = merge_manual_sections(existing, draft)
+    assert RAW_DOC_EXTRACTION_GAP in merged
+
+
+def test_merge_drops_bq_gap_when_divergence_cites_table_schema():
+    existing = (
+        "---\ntype: Framework\n---\n# Page\n\n"
+        "## Core Formula\n\nScaffold formula.\n\n"
+        "## Known Doc-vs-Code Divergences\n\n"
+        f"- **Formula wording** — mismatch (evidence: `bq-schema:{TABLE}`)\n\n"
+        "## Known Gaps\n\n"
+        f"- {RAW_DOC_EXTRACTION_GAP}\n"
+        f"- {bq_cross_check_gap(TABLE)}\n"
+    )
+    merged = merge_manual_sections(existing, GAP_PAGE_DRAFT)
+    assert bq_cross_check_gap(TABLE) not in merged
+    assert RAW_DOC_EXTRACTION_GAP in merged  # unrelated gap untouched
+
+
+def test_merge_gap_reappears_once_grounding_is_invalidated():
+    existing = (
+        "---\ntype: Framework\n---\n# Page\n\n"
+        "## Core Formula\n\n`x = y` [src: raw-doc:docs/a.md]\n\n"
+        "## Known Doc-vs-Code Divergences\n\nNone recorded yet.\n\n"
+        "## Known Gaps\n\n"
+        f"- {RAW_DOC_EXTRACTION_GAP}\n"
+    )
+    draft = (
+        "---\ntype: Framework\n---\n# Page\n\n"
+        "## Core Formula\n\nScaffold formula.\n\n"
+        "## Known Doc-vs-Code Divergences\n\nNone recorded yet.\n\n"
+        "## Known Gaps\n\n"
+        f"- {RAW_DOC_EXTRACTION_GAP}\n"
+    )
+    # While the citation is fresh, the gap stays resolved.
+    assert RAW_DOC_EXTRACTION_GAP not in merge_manual_sections(existing, draft)
+    # Once its evidence goes stale, Core Formula reverts to scaffold and the
+    # gap bullet must come back — the page must never claim resolution for a
+    # citation it just discarded.
+    merged = merge_manual_sections(
+        existing, draft, stale_evidence=frozenset({"raw-doc:docs/a.md"})
+    )
+    assert RAW_DOC_EXTRACTION_GAP in merged
+
+
 def test_stale_evidence_ids_mapping():
     cfg = load_config(EXAMPLE_CONFIG)
     changes = SourceChanges(
@@ -134,6 +229,10 @@ def test_update_invalidates_llm_sections_when_cited_doc_changes(tmp_path, monkey
     assert "`total_value = quantity * price`" not in after
     assert "invalidated because its cited evidence changed" in after
     assert RAW_DOC_ID in after
+    # The Known Gaps bullet this formula had resolved must come back — the
+    # page can't claim raw-doc extraction is done next to a reverted,
+    # no-longer-cited Core Formula section.
+    assert "have not been extracted from" in after
 
     # The run settles: a follow-up update is a strict no-op.
     again = run_update(cfg, root, LATER)

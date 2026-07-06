@@ -101,7 +101,13 @@ def _reconcile_gap_bullets(merged: dict[str, str]) -> str:
         return block
     heading_line, *body_lines = lines
 
-    formula_grounded = CITATION_MARK in merged.get("Core Formula", "")
+    # Only a formula grounded in raw-doc evidence resolves the "not
+    # extracted from raw docs" bullet — a formula grounded purely in code or
+    # a human note doesn't speak to raw-doc extraction at all.
+    formula_grounded = any(
+        e.startswith("raw-doc:")
+        for e in cited_evidence_ids(merged.get("Core Formula", ""))
+    )
     # Divergences cite evidence as backtick-wrapped ids ("evidence: `id`"),
     # not the `[src: id]` marker prose sections use — check both forms.
     evidence_text = merged.get("Core Formula", "") + merged.get(

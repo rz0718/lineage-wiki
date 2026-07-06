@@ -407,6 +407,35 @@ def test_generate_use_llm_end_to_end(tmp_path, monkeypatch):
     assert any("not in the allowed list" in r for r in transcript["rejected"])
 
 
+def test_generate_use_llm_resolves_known_gaps(tmp_path, monkeypatch):
+    """A page must not simultaneously claim a fact is unverified while
+    showing the verified, cited fact — the specific regression this
+    reconciliation logic exists to prevent."""
+    root = _setup_target(tmp_path, monkeypatch)
+    result = runner.invoke(
+        app,
+        ["generate", "--config", str(EXAMPLE_CONFIG), "--root", str(root), "--use-llm"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "llm       gaps resolved: 2" in result.output
+
+    framework = (root / "okf" / "frameworks" / "example-chain.md").read_text(
+        encoding="utf-8"
+    )
+    gaps = framework.split("## Known Gaps")[1].split("## Known Doc-vs-Code")[0]
+
+    # Resolved: a grounded Core Formula was published, and the BigQuery
+    # table's schema was cross-checked via the recorded divergence.
+    assert "have not been extracted from" not in gaps
+    assert "has not been cross-checked" not in gaps
+    # Still open: nothing in this run touched these.
+    assert "No component pages exist yet" in gaps
+    assert "no local clone available" in gaps
+    assert "no verified source mapping" in gaps
+    # The rejected formula still lands as its own gap.
+    assert "A proposed formula (profit = revenue - cost) was rejected" in gaps
+
+
 def test_llm_sections_survive_deterministic_rerun(tmp_path, monkeypatch):
     root = _setup_target(tmp_path, monkeypatch)
     cfg = load_config(EXAMPLE_CONFIG)
@@ -415,6 +444,9 @@ def test_llm_sections_survive_deterministic_rerun(tmp_path, monkeypatch):
 
     framework_rel = "okf/frameworks/example-chain.md"
     before = (root / framework_rel).read_text(encoding="utf-8")
+    gaps_before = before.split("## Known Gaps")[1].split("## Known Doc-vs-Code")[0]
+    assert "have not been extracted from" not in gaps_before
+    assert "has not been cross-checked" not in gaps_before
 
     second = run_generate(cfg, root, FIXED_NOW)  # deterministic, no LLM
     after = (root / framework_rel).read_text(encoding="utf-8")
