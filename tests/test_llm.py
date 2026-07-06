@@ -457,6 +457,43 @@ def test_llm_sections_survive_deterministic_rerun(tmp_path, monkeypatch):
     assert update.noop
 
 
+def test_llm_planner_selects_component_pages_but_cannot_invent(tmp_path):
+    """Configured component pages are eligible planner targets; pages
+    outside the deterministic plan are silently dropped."""
+    from lineage_wiki.agent.llm_pipeline import _run_planner
+    from lineage_wiki.agent.prompts import load_prompts
+    from lineage_wiki.okf.templates import plan_chain_pages
+
+    from .test_templates import component_cfg
+
+    cfg = component_cfg(load_config(EXAMPLE_CONFIG))
+    plan = plan_chain_pages(cfg, tmp_path, FIXED_NOW)
+    component_rel = "okf/components/example-total-value.md"
+    assert component_rel in {d.rel_path for d in plan.pages}
+
+    provider = MockProvider(
+        responses={
+            "page_planner": json.dumps(
+                {
+                    "pages": [
+                        {
+                            "rel_path": component_rel,
+                            "sections": ["What It Represents", "Formula / Logic"],
+                        },
+                        {
+                            "rel_path": "okf/components/invented-component.md",
+                            "sections": ["What It Represents"],
+                        },
+                    ]
+                }
+            )
+        }
+    )
+    jobs = _run_planner(provider, load_prompts(tmp_path), cfg, plan, 0.0)
+    assert [j.rel_path for j in jobs] == [component_rel]
+    assert jobs[0].sections == ["What It Represents", "Formula / Logic"]
+
+
 def test_dry_run_with_llm_writes_nothing(tmp_path, monkeypatch):
     root = _setup_target(tmp_path, monkeypatch)
     result = runner.invoke(

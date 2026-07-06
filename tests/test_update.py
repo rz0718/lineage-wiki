@@ -238,6 +238,93 @@ def test_new_metric_is_created_and_registered(example_cfg, wiki_root):
     assert "okf/metrics/second-metric.md" in entry.generated_files
 
 
+# --- component pages ---------------------------------------------------------------
+
+
+def test_new_component_config_creates_page(example_cfg, wiki_root):
+    from .test_templates import component_cfg
+
+    run_generate(example_cfg, wiki_root, now=FIXED_NOW)
+    result = run_update(component_cfg(example_cfg), wiki_root, now=LATER)
+
+    assert result.changes.config is True
+    assert "okf/components/example-total-value.md" in result.created
+    assert "okf/components/example-adjustment.md" in result.created
+    framework = (wiki_root / "okf" / "frameworks" / "example-chain.md").read_text()
+    assert "[Example Total Value](../components/example-total-value.md)" in framework
+    assert "okf/components/index.md" in result.indexes_written
+    assert result.report is not None and result.report.errors == []
+
+    entry = load_manifest(wiki_root).chains[example_cfg.chain.id]
+    assert "okf/components/example-total-value.md" in entry.generated_files
+
+
+def test_config_fingerprint_unchanged_for_pre_components_manifests(example_cfg, wiki_root):
+    """Manifests written before `sources.components` existed hashed a config
+    dump without that key. A no-components config must keep producing that
+    exact hash, or every legacy manifest would report a phantom
+    `chain config changed` forever (no content change ever advances the
+    stored fingerprint). Configuring a component must still change it."""
+    from lineage_wiki.ingestion.fingerprints import _sha_obj, compute_fingerprints
+
+    from .test_templates import component_cfg
+
+    legacy_dump = example_cfg.model_dump(
+        exclude={"model", "validation", "bigquery_verification"}
+    )
+    del legacy_dump["sources"]["components"]  # the pre-components dump shape
+
+    current = compute_fingerprints(example_cfg, wiki_root)
+    assert current.config == _sha_obj(legacy_dump)
+    with_components = compute_fingerprints(component_cfg(example_cfg), wiki_root)
+    assert with_components.config != current.config
+
+
+def test_source_changes_impact_linked_component_pages(example_cfg, wiki_root):
+    """Raw doc, code, and BigQuery changes must pull in the component pages
+    linked through framework membership or frontmatter refs."""
+    from lineage_wiki.agent.planner import build_impact_plan
+    from lineage_wiki.okf.templates import plan_chain_pages
+    from lineage_wiki.storage.manifest import SourceChanges
+
+    from .test_templates import SNAPSHOT_TABLE, component_cfg
+
+    cfg = component_cfg(example_cfg)
+    run_generate(cfg, wiki_root, now=FIXED_NOW)
+    planned = plan_chain_pages(cfg, wiki_root, LATER).pages
+
+    linked = "okf/components/example-total-value.md"
+    bare = "okf/components/example-adjustment.md"
+
+    # raw doc change -> every component of the framework
+    plan = build_impact_plan(
+        cfg, wiki_root, LATER,
+        SourceChanges(raw_docs=["raw_files/example/methodology.md"]), planned,
+    )
+    assert linked in plan.pages and bare in plan.pages
+
+    # repo change -> only components whose code_refs point at its code link
+    plan = build_impact_plan(
+        cfg, wiki_root, LATER, SourceChanges(repos=["example-pipeline"]), planned
+    )
+    assert linked in plan.pages and bare not in plan.pages
+
+    # bigquery change -> only components whose output_refs point at its output
+    plan = build_impact_plan(
+        cfg, wiki_root, LATER, SourceChanges(bigquery=[SNAPSHOT_TABLE]), planned
+    )
+    assert linked in plan.pages and bare not in plan.pages
+    assert f"bigquery table `{SNAPSHOT_TABLE}` changed" in plan.pages[linked]
+
+    # report change -> components linked to the in-scope output pages
+    plan = build_impact_plan(
+        cfg, wiki_root, LATER,
+        SourceChanges(reports=["Example Daily Report"]), planned,
+    )
+    assert linked in plan.pages and bare not in plan.pages
+    assert "report `Example Daily Report` mapping changed" in plan.pages[linked]
+
+
 # --- run metadata ----------------------------------------------------------------
 
 

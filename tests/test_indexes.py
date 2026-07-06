@@ -39,6 +39,27 @@ def test_indexes_register_generated_pages(example_cfg, tmp_path):
     assert "| Example Chain | Framework | [Example Chain Framework](../frameworks/example-chain.md) |" in metrics_index
 
 
+def test_indexes_register_generated_component_pages(example_cfg, tmp_path):
+    from .test_templates import component_cfg
+
+    run_generate(component_cfg(example_cfg), tmp_path, now=FIXED_NOW)
+    okf = tmp_path / "okf"
+
+    components_index = (okf / "components" / "index.md").read_text()
+    assert "## Example Chain Components" in components_index
+    assert "(example-total-value.md)" in components_index
+    assert "(example-adjustment.md)" in components_index
+
+    root_index = (okf / "index.md").read_text()
+    assert "[Example Total Value](components/example-total-value.md)" in root_index
+
+    metrics_index = (okf / "metrics" / "index.md").read_text()
+    assert (
+        "| Example Total Value | Component | "
+        "[Example Total Value](../components/example-total-value.md) |"
+    ) in metrics_index
+
+
 def test_empty_tree_produces_stub_indexes(tmp_path):
     okf = tmp_path / "okf"
     okf.mkdir()
@@ -94,6 +115,28 @@ def test_human_metric_page_gets_registered(example_cfg, tmp_path):
     drafts = {d.rel_path: d.content for d in build_all_indexes(tmp_path / "okf", FIXED_NOW)}
     registry = drafts["okf/metrics/index.md"]
     assert "| Hand Metric | [Hand Metric](hand-metric.md) |" in registry
+
+
+def test_scan_resolves_structured_ref_entries(example_cfg, tmp_path):
+    """Hand-written pages may use the structured dict ref form the framework
+    template emits; impact planning relies on scan_pages resolving those."""
+    run_generate(example_cfg, tmp_path, now=FIXED_NOW)
+    (tmp_path / "okf" / "components" / "hand-component.md").write_text(
+        "---\n"
+        "type: Component\n"
+        "title: Hand Component\n"
+        "framework_refs:\n"
+        "  - ../frameworks/example-chain.md\n"
+        "output_refs:\n"
+        "  - system: bigquery\n"
+        "    table: example-project.analytics.example_daily_snapshot\n"
+        "    output: ../outputs/example-daily-snapshot.md\n"
+        "---\n\n# Hand Component\n"
+    )
+    page = next(
+        p for p in scan_pages(tmp_path / "okf") if p.rel == "components/hand-component.md"
+    )
+    assert page.output_refs == ["outputs/example-daily-snapshot.md"]
 
 
 def test_scan_skips_index_and_broken_pages(example_cfg, tmp_path):

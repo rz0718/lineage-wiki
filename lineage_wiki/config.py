@@ -107,6 +107,25 @@ class MetricInput(_StrictModel):
     grain: str = ""
 
 
+class ComponentInput(_StrictModel):
+    """Formula / business-rule building block supplied as chain input
+    (optional). ``code_ref`` names a configured repo (or its code-link page
+    stem); ``output_refs`` name tables configured under
+    ``sources.bigquery.tables``. Unmatched refs become Known Gaps."""
+
+    name: str
+    description: str = ""
+    code_ref: str | None = None
+    output_refs: list[str] = Field(default_factory=list)
+
+    @field_validator("name")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must be non-empty")
+        return value
+
+
 class SourcesSpec(_StrictModel):
     raw_docs: list[RawDocSource] = Field(default_factory=list)
     repos: list[RepoSource] = Field(default_factory=list)
@@ -114,6 +133,7 @@ class SourcesSpec(_StrictModel):
     reports: list[ReportSource] = Field(default_factory=list)
     human_notes: list[HumanNote] = Field(default_factory=list)
     metrics: list[MetricInput] = Field(default_factory=list)
+    components: list[ComponentInput] = Field(default_factory=list)
 
 
 class GenerationSpec(_StrictModel):

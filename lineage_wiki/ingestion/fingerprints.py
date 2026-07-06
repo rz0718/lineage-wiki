@@ -135,17 +135,23 @@ def compute_fingerprint_result(
             cfg.sources.bigquery,
             previous.bigquery if previous is not None else None,
         )
+    # bigquery_verification is excluded too: verify-bq settings do not
+    # affect deterministic page output, so tuning them must not register
+    # as a chain-config change.
+    config_dump = cfg.model_dump(exclude={"model", "validation", "bigquery_verification"})
+    if not config_dump["sources"]["components"]:
+        # `sources.components` postdates existing manifests; hashing its
+        # empty default would flag `chain config changed` forever on
+        # pre-components manifests (no content change ever rewrites the
+        # stored fingerprint). Dropping the empty key keeps legacy hashes
+        # stable while configuring a component still registers as a change.
+        del config_dump["sources"]["components"]
     return FingerprintComputation(SourceFingerprints(
         repos={repo.name: fingerprint_repo(root, repo) for repo in cfg.sources.repos},
         bigquery=bigquery,
         raw_docs={doc.path: fingerprint_raw_doc(root, doc.path) for doc in cfg.sources.raw_docs},
         reports={r.name: _sha_obj(r.model_dump()) for r in cfg.sources.reports},
-        # bigquery_verification is excluded too: verify-bq settings do not
-        # affect deterministic page output, so tuning them must not register
-        # as a chain-config change.
-        config=_sha_obj(
-            cfg.model_dump(exclude={"model", "validation", "bigquery_verification"})
-        ),
+        config=_sha_obj(config_dump),
     ), warnings)
 
 

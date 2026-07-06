@@ -5,9 +5,9 @@ Maps changed evidence to the OKF pages that must be considered:
 | Changed evidence   | Pages to consider                                        |
 |--------------------|----------------------------------------------------------|
 | Code files/symbols | code-links, linked components, framework, change-checks  |
-| BigQuery schema    | outputs, framework, report-templates, change-checks      |
+| BigQuery schema    | outputs, linked components, framework, report-templates, change-checks |
 | Raw docs           | framework, components, metrics                           |
-| Report mapping     | report-templates, outputs, framework, change-checks      |
+| Report mapping     | report-templates, outputs, linked components, framework, change-checks |
 | Chain config       | every page planned for the chain                         |
 
 The plan includes hand-written pages linked to the chain's framework (found
@@ -130,6 +130,9 @@ def build_impact_plan(
         output = next((rel for t, rel, _ in ctx.outputs if t == table), None)
         if output:
             add(output, reason)
+            for page in chain_components:
+                if output in page.output_refs:
+                    add(page.rel, reason)
         add(fw, reason)
         for _, report_rel, _ in ctx.reports:
             add(report_rel, reason)
@@ -142,6 +145,11 @@ def build_impact_plan(
             add(report, reason)
         for _, output_rel, _ in ctx.outputs:
             add(output_rel, reason)
+            # Report lines trace through output columns to component
+            # formulas: components linked to an in-scope output follow it.
+            for page in chain_components:
+                if output_rel in page.output_refs:
+                    add(page.rel, reason)
         add(fw, reason)
         add(ctx.change_check_rel, reason)
 

@@ -14,8 +14,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..config import ChainConfig, MetricInput, RepoSource, ReportSource
-from ..connectors.bigquery_connector import BigQueryLoadResult, TableSchema
+from ..config import ChainConfig, ComponentInput, MetricInput, RepoSource, ReportSource
+from ..connectors.bigquery_connector import (
+    BigQueryLoadResult,
+    TableSchema,
+    parse_table_name,
+)
 from ..connectors.local_repo_connector import RepoLoadResult
 from ..ingestion.code_indexer import CodeIndex, index_repo
 from ..ingestion.evidence import EvidenceItem
@@ -46,6 +50,20 @@ class ChainPlan:
 
 
 @dataclass
+class PlannedComponent:
+    """One configured component with its refs resolved against the config."""
+
+    spec: ComponentInput
+    rel: str  # components/<slug>.md within the okf dir
+    title: str
+    code_link_rel: str | None = None
+    code_link_title: str = ""
+    # resolved (table, output rel, output title) for matched output_refs
+    output_links: list[tuple[str, str, str]] = field(default_factory=list)
+    unmatched_outputs: list[str] = field(default_factory=list)
+
+
+@dataclass
 class _Ctx:
     cfg: ChainConfig
     now: str
@@ -55,6 +73,7 @@ class _Ctx:
     # (source object, rel path within okf dir, page title)
     code_links: list[tuple[RepoSource, str, str]] = field(default_factory=list)
     outputs: list[tuple[str, str, str]] = field(default_factory=list)
+    components: list[PlannedComponent] = field(default_factory=list)
     reports: list[tuple[ReportSource, str, str]] = field(default_factory=list)
     metrics: list[tuple[MetricInput, str]] = field(default_factory=list)
     change_check_rel: str = ""
@@ -112,6 +131,48 @@ def bq_cross_check_table(bullet_text: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _norm_table(table: str, default_project: str | None) -> str:
+    """Canonical table identity for ref matching: the fully-qualified
+    ``project.dataset.table``, with the same backtick/whitespace/default-
+    project tolerance the BigQuery config and connector accept. Names that
+    cannot be qualified fall back to the stripped spelling (and simply
+    won't match a differently-spelled configured table)."""
+    try:
+        return parse_table_name(table, default_project).fqtn
+    except ValueError:
+        return table.strip().strip("`")
+
+
+def _plan_components(ctx: _Ctx) -> None:
+    """Resolve each configured component's refs against the configured repos
+    and BigQuery tables. Resolution is config-only — no evidence is consulted
+    — so unmatched refs are config mistakes, recorded as Known Gaps."""
+    bq = ctx.cfg.sources.bigquery
+    project = bq.project if bq else None
+    for comp in ctx.cfg.sources.components:
+        planned = PlannedComponent(
+            spec=comp, rel=f"components/{slugify(comp.name)}.md", title=comp.name
+        )
+        if comp.code_ref:
+            want = slugify(comp.code_ref)
+            for repo, rel, title in ctx.code_links:
+                stem = posixpath.basename(rel).removesuffix(".md")
+                if want in (slugify(repo.name), stem):
+                    planned.code_link_rel = rel
+                    planned.code_link_title = title
+                    break
+        for table in comp.output_refs:
+            want = _norm_table(table, project)
+            match = next(
+                (o for o in ctx.outputs if _norm_table(o[0], project) == want), None
+            )
+            if match is not None:
+                planned.output_links.append(match)
+            else:
+                planned.unmatched_outputs.append(table)
+        ctx.components.append(planned)
+
+
 def _build_ctx(cfg: ChainConfig, root: Path, now: str) -> _Ctx:
     chain = cfg.chain
     ctx = _Ctx(cfg=cfg, now=now, okf=cfg.generation.output_dir)
@@ -134,6 +195,8 @@ def _build_ctx(cfg: ChainConfig, root: Path, now: str) -> _Ctx:
 
     for report in cfg.sources.reports:
         ctx.reports.append((report, f"report-templates/{slugify(report.name)}.md", report.name))
+
+    _plan_components(ctx)
 
     if cfg.generation.create_missing_metrics:
         for metric in cfg.sources.metrics:
@@ -158,10 +221,27 @@ def _build_ctx(cfg: ChainConfig, root: Path, now: str) -> _Ctx:
             "Source methodology has not been ingested; framework scope "
             "details, assumptions, and formulas are undocumented."
         )
-    gaps.append(
-        "No component pages exist yet; the component inventory is unknown "
-        "until formula-level evidence is ingested."
-    )
+    if not ctx.components:
+        gaps.append(
+            "No component pages exist yet; the component inventory is unknown "
+            "until formula-level evidence is ingested."
+        )
+    for planned in ctx.components:
+        comp = planned.spec
+        if not comp.description:
+            gaps.append(f"Component `{comp.name}` has no configured description.")
+        if comp.code_ref and planned.code_link_rel is None:
+            gaps.append(
+                f"Component `{comp.name}` has code_ref `{comp.code_ref}` that "
+                "does not match any configured repo; the code reference is "
+                "unresolved."
+            )
+        for table in planned.unmatched_outputs:
+            gaps.append(
+                f"Component `{comp.name}` references output `{table}` that is "
+                "not configured under sources.bigquery.tables; the output "
+                "reference is unresolved."
+            )
     for path in ctx.raw_docs_missing:
         gaps.append(f"Configured raw doc `{path}` was not found at generate time.")
     for repo, _, _ in ctx.code_links:
@@ -288,6 +368,8 @@ def render_framework_page(ctx: _Ctx) -> str:
             }
             for i, (table, rel, _) in enumerate(ctx.outputs)
         ]
+    if ctx.components:
+        fm["component_refs"] = [ctx.link_from(d, pc.rel) for pc in ctx.components]
     if ctx.reports:
         fm["report_refs"] = [ctx.link_from(d, rel) for _, rel, _ in ctx.reports]
     if ctx.metrics:
@@ -336,6 +418,23 @@ def render_framework_page(ctx: _Ctx) -> str:
         [f"[{title}]({ctx.link_from(d, rel)})" for _, rel, title in ctx.reports],
         "No reports are configured for this chain.",
     )
+
+    if ctx.components:
+        component_items = [
+            f"[{pc.title}]({ctx.link_from(d, pc.rel)})"
+            + (f" — {pc.spec.description}" if pc.spec.description else "")
+            for pc in ctx.components
+        ]
+        components = (
+            "Component pages generated from the chain config (formula-level "
+            "evidence pending):\n\n" + _bullets(component_items, "")
+        )
+    else:
+        components = (
+            "No component pages have been generated for this framework yet. "
+            "Components\nare added once formula-level evidence is ingested — "
+            "see\n[Known Gaps](#known-gaps)."
+        )
 
     sources: list[str] = []
     for doc in ctx.raw_docs_found:
@@ -402,9 +501,7 @@ evidence is ingested — see [Known Gaps](#known-gaps).
 
 ## Components
 
-No component pages have been generated for this framework yet. Components
-are added once formula-level evidence is ingested — see
-[Known Gaps](#known-gaps).
+{components}
 
 ## Implementation
 
@@ -456,10 +553,12 @@ def render_component_page(
     title: str,
     description: str = "",
     code_link_rel: str | None = None,
+    output_links: list[tuple[str, str, str]] | None = None,
 ) -> str:
-    """Component scaffold. Not emitted by the deterministic generate run (no
-    component evidence exists in a chain config), but part of the template
-    contract for later milestones."""
+    """Component scaffold for one configured ``sources.components`` entry.
+    Identity, description, and resolved code/output refs come from the chain
+    config alone; formula-level content stays a Known Gap until evidence is
+    ingested (``--use-llm`` enrichment)."""
     d = "components"
     fm = _base_fm(
         ctx,
@@ -471,6 +570,8 @@ def render_component_page(
     fm["framework_refs"] = [ctx.link_from(d, ctx.framework_rel)]
     if code_link_rel:
         fm["code_refs"] = [ctx.link_from(d, code_link_rel)]
+    if output_links:
+        fm["output_refs"] = [ctx.link_from(d, rel) for _, rel, _ in output_links]
 
     if code_link_rel:
         code_cell = f"[code link]({ctx.link_from(d, code_link_rel)})"
@@ -481,6 +582,21 @@ def render_component_page(
             "No code link is associated with this component yet — see the "
             f"framework page's [Known Gaps]({ctx.link_from(d, ctx.framework_rel)}#known-gaps)."
         )
+
+    if output_links:
+        outputs = (
+            "Configured BigQuery outputs for this component (column-level "
+            "mapping not yet verified):\n\n"
+            + _bullets(
+                [
+                    f"[{o_title}]({ctx.link_from(d, o_rel)}) — `{table}`"
+                    for table, o_rel, o_title in output_links
+                ],
+                "",
+            )
+        )
+    else:
+        outputs = "Not yet documented."
 
     body = f"""\
 # {title}
@@ -493,7 +609,7 @@ def render_component_page(
 
 | Component | What it represents | Driving factors | Code location |
 |---|---|---|---|
-| {title} | Not yet documented | Not yet documented | {code_cell} |
+| {title} | {_md_cell(description) if description else "Not yet documented"} | Not yet documented | {code_cell} |
 
 ## Formula / Logic
 
@@ -507,7 +623,7 @@ Not yet documented.
 
 ## Outputs
 
-Not yet documented.
+{outputs}
 
 ## Edge Cases
 
@@ -959,6 +1075,7 @@ def render_change_check_page(ctx: _Ctx) -> str:
     )
 
     impacted = [f"[{ctx.framework_title}]({ctx.link_from(d, ctx.framework_rel)})"]
+    impacted += [f"[{pc.title}]({ctx.link_from(d, pc.rel)})" for pc in ctx.components]
     impacted += [f"[{t}]({ctx.link_from(d, r)})" for _, r, t in ctx.code_links]
     impacted += [f"[{t}]({ctx.link_from(d, r)})" for _, r, t in ctx.outputs]
     impacted += [f"[{t}]({ctx.link_from(d, r)})" for _, r, t in ctx.reports]
@@ -1091,6 +1208,21 @@ def plan_chain_pages(cfg: ChainConfig, root: Path, now: str) -> ChainPlan:
     ctx = _build_ctx(cfg, root, now)
     okf = ctx.okf
     pages = [PageDraft(f"{okf}/{ctx.framework_rel}", render_framework_page(ctx))]
+    # Components come right after the framework and before the pages that
+    # may reference them (outputs, reports, change checks).
+    for pc in ctx.components:
+        pages.append(
+            PageDraft(
+                f"{okf}/{pc.rel}",
+                render_component_page(
+                    ctx,
+                    title=pc.title,
+                    description=pc.spec.description,
+                    code_link_rel=pc.code_link_rel,
+                    output_links=pc.output_links,
+                ),
+            )
+        )
     for repo, rel, title in ctx.code_links:
         pages.append(PageDraft(f"{okf}/{rel}", render_code_link_page(ctx, repo, rel, title)))
     for table, rel, title in ctx.outputs:

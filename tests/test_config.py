@@ -31,6 +31,55 @@ def test_defaults_are_applied():
     assert cfg.model.temperature == 0.0
 
 
+def test_components_config_parses():
+    cfg = ChainConfig.model_validate(
+        {
+            "chain": {"id": "gold_pnl", "name": "Gold PnL"},
+            "sources": {
+                "components": [
+                    {
+                        "name": "Realized PnL",
+                        "description": "Closed-position profit and loss.",
+                        "code_ref": "gold-pnl-engine",
+                        "output_refs": ["project.dataset.gold_pnl_daily"],
+                    },
+                    {"name": "Unrealized MTM"},
+                ]
+            },
+        }
+    )
+    first, second = cfg.sources.components
+    assert first.name == "Realized PnL"
+    assert first.code_ref == "gold-pnl-engine"
+    assert first.output_refs == ["project.dataset.gold_pnl_daily"]
+    assert second.description == "" and second.code_ref is None
+    assert second.output_refs == []
+
+
+def test_components_default_to_empty(example_cfg):
+    assert example_cfg.sources.components == []
+
+
+def test_component_requires_non_empty_name(tmp_path):
+    path = tmp_path / "bad.yml"
+    path.write_text(
+        "chain:\n  id: x\n  name: X\n"
+        "sources:\n  components:\n    - name: '  '\n"
+    )
+    with pytest.raises(ConfigError, match="non-empty"):
+        load_config(path)
+
+
+def test_component_unknown_key_fails(tmp_path):
+    path = tmp_path / "bad.yml"
+    path.write_text(
+        "chain:\n  id: x\n  name: X\n"
+        "sources:\n  components:\n    - name: A\n      formula: invented\n"
+    )
+    with pytest.raises(ConfigError, match="formula"):
+        load_config(path)
+
+
 def test_missing_chain_fails(tmp_path):
     path = tmp_path / "bad.yml"
     path.write_text("sources: {}\n")

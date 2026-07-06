@@ -29,15 +29,21 @@ class PageInfo:
     status: str
     framework_refs: list[str] = field(default_factory=list)
     code_refs: list[str] = field(default_factory=list)
+    output_refs: list[str] = field(default_factory=list)
 
 
 def _resolved_refs(fm: dict, key: str, page_dir: str) -> list[str]:
+    """Page paths referenced under ``key``, resolved relative to the page.
+    Entries may be plain rel-path strings or the structured dict form other
+    templates emit (e.g. ``{system, table, output: ../outputs/x.md}``)."""
     refs = []
     raw_refs = fm.get(key) or []
     if isinstance(raw_refs, list):
         for ref in raw_refs:
-            if isinstance(ref, str) and ref.endswith(".md"):
-                refs.append(posixpath.normpath(posixpath.join(page_dir, ref)))
+            values = ref.values() if isinstance(ref, dict) else [ref]
+            for value in values:
+                if isinstance(value, str) and value.endswith(".md"):
+                    refs.append(posixpath.normpath(posixpath.join(page_dir, value)))
     return refs
 
 
@@ -64,6 +70,7 @@ def scan_pages(okf_dir: Path) -> list[PageInfo]:
                 status=str(fm.get("status") or "draft"),
                 framework_refs=_resolved_refs(fm, "framework_refs", page_dir),
                 code_refs=_resolved_refs(fm, "code_refs", page_dir),
+                output_refs=_resolved_refs(fm, "output_refs", page_dir),
             )
         )
     return pages

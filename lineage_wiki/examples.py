@@ -73,6 +73,18 @@ sources:
       unit: IDR
       grain: daily
 
+  # Optional formula / business-rule components under this framework. Each
+  # entry becomes a deterministic okf/components/<slug>.md scaffold page.
+  # code_ref names a configured repo (or its code-link page stem);
+  # output_refs name tables configured under sources.bigquery.tables.
+  # Unmatched refs are recorded as Known Gaps, never silently ignored.
+  # components:
+  #   - name: Example Total Value
+  #     description: "Total value per asset per day."
+  #     code_ref: example-pipeline
+  #     output_refs:
+  #       - example-project.analytics.example_daily_snapshot
+
 generation:
   output_dir: okf
   raw_files_dir: raw_files/example
