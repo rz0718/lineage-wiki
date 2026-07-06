@@ -299,6 +299,14 @@ def update(
         return
 
     _print_write_outcome(result, dry_run=False)
+    for rel, sections in result.invalidated.items():
+        for heading, stale_ids in sections:
+            typer.secho(
+                f"invalidated {rel} — '{heading}' cited changed evidence "
+                f"({', '.join(stale_ids)}); reverted to scaffold, re-run "
+                "`generate --use-llm` to re-extract",
+                fg=typer.colors.YELLOW,
+            )
     typer.echo(
         f"manifest  {'written' if result.manifest_written else 'unchanged'}"
     )

@@ -223,8 +223,14 @@ to verify itself:
 
 Sections written by an LLM run (recognizable by their citations) survive
 later deterministic generate/update runs; only a new `--use-llm` run
-rewrites them. The full stage transcript (claims accepted/rejected with
-reasons) goes to `.lineage-wiki/runs/<run-id>-generate-llm.json`.
+rewrites them — **unless their cited evidence changed**: when an update run
+detects that a source cited by `[src: …]` markers has a new fingerprint,
+the section is reverted to scaffold with a visible invalidation note
+(re-run `generate --use-llm` to re-extract), so stale prose never survives
+under a valid-looking citation. `update --plan-only` predicts these
+reverts as validation risks. The full stage transcript (claims
+accepted/rejected with reasons) goes to
+`.lineage-wiki/runs/<run-id>-generate-llm.json`.
 
 ```bash
 # Mocked run — no credentials, no network (see the fixtures for the shape):

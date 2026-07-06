@@ -161,6 +161,9 @@ class WriteOutcome:
     indexes_skipped: list[str] = field(default_factory=list)  # existing, hand-written
     diffs: dict[str, str] = field(default_factory=dict)  # rel -> one-line summary
     pending: dict[str, str] = field(default_factory=dict)  # rel -> new content
+    # rel -> [(section heading, stale evidence ids)] for LLM-written sections
+    # reverted because their cited evidence changed this run.
+    invalidated: dict[str, list[tuple[str, list[str]]]] = field(default_factory=dict)
 
     def content_changed(self) -> bool:
         return bool(self.created or self.updated or self.indexes_written)
@@ -274,6 +277,34 @@ def _raise_if_validation_failed(report: ValidationReport) -> None:
     raise GenerateError(f"staged output failed validation: {details}")
 
 
+def _stale_evidence_ids(cfg: ChainConfig, changes: SourceChanges) -> frozenset[str]:
+    """Evidence ids (or ``prefix:``-style prefixes) whose sources changed
+    this run. LLM-written sections citing any of them are invalidated
+    instead of being preserved."""
+    from ..connectors.bigquery_connector import parse_table_name
+    from ..util import slugify
+
+    stale: set[str] = set()
+    for path in changes.raw_docs:
+        stale.add(f"raw-doc:{path}")
+    for name in changes.repos:
+        stale.add(f"local-repo:{name}:")  # prefix: any file of that repo
+    project = cfg.sources.bigquery.project if cfg.sources.bigquery else None
+    for table in changes.bigquery:
+        stale.add(f"bq-schema:{table}")
+        try:
+            stale.add(f"bq-schema:{parse_table_name(table, project).fqtn}")
+        except ValueError:
+            pass
+    for name in changes.reports:
+        stale.add(f"report:{slugify(name)}")
+    if changes.config:
+        # Human notes live in the chain config; a config change may have
+        # edited them.
+        stale.add("human-note:")
+    return frozenset(stale)
+
+
 def _write_page(
     root: Path,
     rel: str,
@@ -284,6 +315,7 @@ def _write_page(
     preserve: bool = True,
     dry_run: bool = False,
     force_sections: tuple[str, ...] = (),
+    stale_evidence: frozenset[str] = frozenset(),
 ) -> None:
     target = root / rel
     if target.exists():
@@ -293,9 +325,16 @@ def _write_page(
             return
         existing = target.read_text(encoding="utf-8")
         if preserve:
+            page_invalidated: list[tuple[str, list[str]]] = []
             content = merge_manual_sections(
-                existing, content, force=force_sections
+                existing,
+                content,
+                force=force_sections,
+                stale_evidence=stale_evidence,
+                invalidated=page_invalidated,
             )
+            if page_invalidated:
+                out.invalidated[rel] = page_invalidated
         if materially_equal(existing, content):
             out.unchanged.append(rel)
             return
@@ -757,6 +796,7 @@ def _plan_only_assessment(
     drafts = {d.rel_path: d for d in plan.pages}
     owned = set(previous.generated_files)
     preserve = cfg.generation.preserve_manual_sections
+    stale_evidence = _stale_evidence_ids(cfg, result.changes)
     for rel in sorted(impact_pages):
         draft = drafts.get(rel)
         target = root / rel
@@ -782,7 +822,17 @@ def _plan_only_assessment(
         existing = target.read_text(encoding="utf-8")
         content = draft.content
         if preserve:
-            content = merge_manual_sections(existing, content)
+            page_invalidated: list[tuple[str, list[str]]] = []
+            content = merge_manual_sections(
+                existing, content,
+                stale_evidence=stale_evidence, invalidated=page_invalidated,
+            )
+            for heading, stale_ids in page_invalidated:
+                result.risks.append(
+                    f"{rel}: LLM-written section '{heading}' cites changed "
+                    f"evidence ({', '.join(stale_ids)}) and will be reverted "
+                    "to scaffold — re-run `generate --use-llm` after the update"
+                )
         if materially_equal(existing, content):
             result.actions.append(f"unchanged {rel}")
         else:
@@ -875,10 +925,14 @@ def run_update(
 
     owned = set(previous.generated_files)
     preserve = cfg.generation.preserve_manual_sections
+    stale_evidence = _stale_evidence_ids(cfg, changes)
     for draft in plan.pages:
         if draft.rel_path not in impact.pages:
             continue  # surgical updates: untouched evidence, untouched page
-        _write_page(root, draft.rel_path, draft.content, owned, result, preserve=preserve)
+        _write_page(
+            root, draft.rel_path, draft.content, owned, result,
+            preserve=preserve, stale_evidence=stale_evidence,
+        )
     _finalize_staged_run(
         cfg,
         root,

@@ -46,6 +46,29 @@ def _joined(parts: list[str]) -> str:
 # presence identifies evidence-written content that scaffold rewrites keep.
 CITATION_MARK = "[src:"
 
+_SRC_ID = re.compile(r"\[src:\s*([^\]\s]+)\s*\]")
+
+
+def cited_evidence_ids(text: str) -> list[str]:
+    """Evidence ids cited by ``[src: <id>]`` markers, in order, deduped."""
+    seen: list[str] = []
+    for match in _SRC_ID.finditer(text):
+        if match.group(1) not in seen:
+            seen.append(match.group(1))
+    return seen
+
+
+def _stale_cited(block: str, stale_evidence: frozenset[str] | set[str]) -> list[str]:
+    """Cited ids in ``block`` matching the stale set. Entries ending in
+    ``:`` are prefixes (e.g. ``local-repo:gold-pnl:``), others exact ids."""
+    prefixes = tuple(e for e in stale_evidence if e.endswith(":"))
+    exact = {e for e in stale_evidence if not e.endswith(":")}
+    return [
+        cited
+        for cited in cited_evidence_ids(block)
+        if cited in exact or cited.startswith(prefixes or ("\0",))
+    ]
+
 # Prefix for Known Gaps bullets added by the LLM pipeline; deterministic
 # rewrites carry them over instead of reverting them to scaffold gaps.
 LLM_GAP_PREFIX = "- (llm)"
@@ -62,11 +85,22 @@ def _merge_gap_block(existing_block: str, draft_block: str) -> str:
     return draft_block.rstrip("\n") + "\n" + "\n".join(carried) + "\n"
 
 
+def _invalidation_note(stale_ids: list[str]) -> str:
+    cited = ", ".join(f"`{e}`" for e in stale_ids)
+    return (
+        f"> (llm) Previous LLM-written content here was invalidated because "
+        f"its cited evidence changed ({cited}); re-run "
+        f"`lineage-wiki generate --use-llm` to re-extract it."
+    )
+
+
 def merge_manual_sections(
     existing: str,
     draft: str,
     preserved: tuple[str, ...] = PRESERVED_SECTIONS,
     force: tuple[str, ...] = (),
+    stale_evidence: frozenset[str] | set[str] = frozenset(),
+    invalidated: list[tuple[str, list[str]]] | None = None,
 ) -> str:
     """Render ``draft`` while keeping manual content from ``existing``:
 
@@ -74,7 +108,11 @@ def merge_manual_sections(
       run intentionally rewrote it, e.g. the LLM pipeline);
     - a section named in ``preserved`` keeps its existing body;
     - a section whose existing body carries ``[src: …]`` citations is
-      evidence-written (LLM run) and survives a scaffold rewrite;
+      evidence-written (LLM run) and survives a scaffold rewrite — *unless*
+      one of its cited ids is in ``stale_evidence`` (that evidence changed
+      this run), in which case the section reverts to the draft body plus a
+      visible invalidation note, and ``(heading, stale_ids)`` is appended to
+      ``invalidated`` when provided;
     - ``Known Gaps`` keeps ``- (llm)`` bullets from previous LLM runs;
     - sections present only in ``existing`` are retained (appended after
       the draft's sections, in their original order).
@@ -97,7 +135,17 @@ def merge_manual_sections(
         elif heading == "Known Gaps":
             parts.append(_merge_gap_block(old, block))
         elif CITATION_MARK in old and CITATION_MARK not in block:
-            parts.append(old)
+            stale_ids = _stale_cited(old, stale_evidence)
+            if stale_ids:
+                # The evidence this content cites changed: stale LLM prose
+                # must not survive under a valid-looking citation.
+                parts.append(
+                    block.rstrip("\n") + "\n\n" + _invalidation_note(stale_ids) + "\n"
+                )
+                if invalidated is not None:
+                    invalidated.append((heading, stale_ids))
+            else:
+                parts.append(old)
         else:
             parts.append(block)
     for heading, block in existing_sections:
