@@ -173,7 +173,7 @@ Start here:
 - [OKF index](okf/index.md)
 
 When working on data products, formulas, BigQuery tables, dashboards, risk
-definitions, PnL methodology, spread methodology, treasury definitions, or
+definitions, revenue methodology, spread methodology, data definitions, or
 liquidity definitions:
 
 1. Start from `okf/index.md`.

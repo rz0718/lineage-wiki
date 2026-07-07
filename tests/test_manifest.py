@@ -17,16 +17,16 @@ from lineage_wiki.storage.snapshots import materially_equal
 def test_round_trip(tmp_path):
     manifest = Manifest(
         chains={
-            "gold_pnl": ChainManifest(
-                chain_slug="gold-pnl",
-                generated_files=["okf/frameworks/gold-pnl.md"],
+            "example_revenue": ChainManifest(
+                chain_slug="example-revenue",
+                generated_files=["okf/frameworks/example-revenue.md"],
                 managed_indexes=["okf/index.md"],
                 last_run_at="2026-07-03T00:00:00Z",
                 last_content_snapshot="sha256:abc",
             ),
-            "gold_spread": ChainManifest(
-                chain_slug="gold-spread",
-                generated_files=["okf/frameworks/gold-spread.md"],
+            "example_spread": ChainManifest(
+                chain_slug="example-spread",
+                generated_files=["okf/frameworks/example-spread.md"],
                 managed_indexes=["okf/index.md"],
                 last_run_at="2026-07-03T01:00:00Z",
                 last_content_snapshot="sha256:def",
@@ -38,7 +38,7 @@ def test_round_trip(tmp_path):
     loaded = load_manifest(tmp_path)
     assert loaded == manifest
     assert loaded.version == 2
-    assert sorted(loaded.chains) == ["gold_pnl", "gold_spread"]
+    assert sorted(loaded.chains) == ["example_revenue", "example_spread"]
 
 
 def test_load_legacy_v1_manifest_migrates_to_multichain(tmp_path):
@@ -47,18 +47,18 @@ def test_load_legacy_v1_manifest_migrates_to_multichain(tmp_path):
     path.write_text(
         """
 version: 1
-chain_id: gold_pnl
-chain_slug: gold-pnl
+chain_id: example_revenue
+chain_slug: example-revenue
 output_dir: okf
 generated_files:
-  - okf/frameworks/gold-pnl.md
+  - okf/frameworks/example-revenue.md
 managed_indexes:
   - okf/index.md
 file_snapshots:
-  okf/frameworks/gold-pnl.md: sha256:file
+  okf/frameworks/example-revenue.md: sha256:file
 source_fingerprints:
   raw_docs:
-    raw_files/goldpnl/GoldPNLDoc.md: sha256:doc
+    raw_files/example/ExampleMethodology.md: sha256:doc
 last_run_at: '2026-07-03T00:00:00Z'
 last_content_snapshot: sha256:abc
 okf_git_head: abc123
@@ -69,13 +69,13 @@ okf_git_head: abc123
     loaded = load_manifest(tmp_path)
 
     assert loaded.version == 2
-    entry = loaded.chains["gold_pnl"]
-    assert entry.chain_slug == "gold-pnl"
-    assert entry.generated_files == ["okf/frameworks/gold-pnl.md"]
+    entry = loaded.chains["example_revenue"]
+    assert entry.chain_slug == "example-revenue"
+    assert entry.generated_files == ["okf/frameworks/example-revenue.md"]
     assert entry.managed_indexes == ["okf/index.md"]
-    assert entry.file_snapshots["okf/frameworks/gold-pnl.md"] == "sha256:file"
+    assert entry.file_snapshots["okf/frameworks/example-revenue.md"] == "sha256:file"
     assert entry.source_fingerprints.raw_docs[
-        "raw_files/goldpnl/GoldPNLDoc.md"
+        "raw_files/example/ExampleMethodology.md"
     ] == "sha256:doc"
     assert entry.okf_git_head == "abc123"
 
@@ -87,9 +87,9 @@ def test_load_legacy_v1_manifest_rejects_empty_chain_id(tmp_path):
         """
 version: 1
 chain_id: ''
-chain_slug: gold-pnl
+chain_slug: example-revenue
 generated_files:
-  - okf/frameworks/gold-pnl.md
+  - okf/frameworks/example-revenue.md
 """.lstrip(),
         encoding="utf-8",
     )
@@ -112,7 +112,7 @@ def test_snapshot_is_deterministic_and_order_independent():
 
 def _fp(**overrides) -> SourceFingerprints:
     base = dict(
-        repos={"gold-pnl": RepoFingerprint(ref="main", paths_hash="sha256:a")},
+        repos={"example-revenue": RepoFingerprint(ref="main", paths_hash="sha256:a")},
         bigquery={"proj.ds.table": "sha256:b"},
         raw_docs={"raw_files/doc.md": "sha256:c"},
         reports={"Daily Report": "sha256:d"},
@@ -131,11 +131,11 @@ def test_diff_fingerprints_no_changes():
 def test_diff_fingerprints_detects_value_changes():
     new = _fp(
         raw_docs={"raw_files/doc.md": "sha256:changed"},
-        repos={"gold-pnl": RepoFingerprint(ref="main", paths_hash="sha256:changed")},
+        repos={"example-revenue": RepoFingerprint(ref="main", paths_hash="sha256:changed")},
     )
     changes = diff_fingerprints(_fp(), new)
     assert changes.raw_docs == ["raw_files/doc.md"]
-    assert changes.repos == ["gold-pnl"]
+    assert changes.repos == ["example-revenue"]
     assert changes.bigquery == [] and changes.reports == []
     assert changes.config is False
     assert changes.any()

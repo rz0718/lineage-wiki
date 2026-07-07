@@ -13,8 +13,8 @@ shape to a versioned multi-chain manifest:
 ```yaml
 version: 2
 chains:
-  gold-pnl:
-    chain_slug: gold-pnl
+  example-revenue:
+    chain_slug: example-revenue
     output_dir: okf
     generated_files: [...]
     managed_indexes: [...]
@@ -22,7 +22,7 @@ chains:
     last_run_at: ...
     last_content_snapshot: ...
     okf_git_head: ...
-  gold-spread:
+  example-spread:
     ...
 ```
 

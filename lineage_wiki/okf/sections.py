@@ -61,7 +61,7 @@ def cited_evidence_ids(text: str) -> list[str]:
 
 def _stale_cited(block: str, stale_evidence: frozenset[str] | set[str]) -> list[str]:
     """Cited ids in ``block`` matching the stale set. Entries ending in
-    ``:`` are prefixes (e.g. ``local-repo:gold-pnl:``), others exact ids."""
+    ``:`` are prefixes (e.g. ``local-repo:example-revenue:``), others exact ids."""
     prefixes = tuple(e for e in stale_evidence if e.endswith(":"))
     exact = {e for e in stale_evidence if not e.endswith(":")}
     return [

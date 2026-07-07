@@ -75,7 +75,7 @@ def test_component_template(example_cfg, tmp_path):
     ctx = build_context(example_cfg, tmp_path, FIXED_NOW)
     content = render_component_page(
         ctx,
-        title="Example WAC",
+        title="Example Average Cost",
         description="Running average cost basis.",
         code_link_rel=ctx.code_links[0][1],
     )

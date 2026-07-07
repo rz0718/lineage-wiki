@@ -23,8 +23,8 @@ def test_repo_example_matches_packaged_example():
 
 
 def test_defaults_are_applied():
-    cfg = ChainConfig.model_validate({"chain": {"id": "gold_pnl", "name": "Gold PnL"}})
-    assert cfg.chain.slug == "gold-pnl"  # derived from id
+    cfg = ChainConfig.model_validate({"chain": {"id": "example_revenue", "name": "Example Revenue"}})
+    assert cfg.chain.slug == "example-revenue"  # derived from id
     assert cfg.generation.output_dir == "okf"
     assert cfg.generation.overwrite_policy == "update_existing"
     assert cfg.sources.repos == []
@@ -34,24 +34,24 @@ def test_defaults_are_applied():
 def test_components_config_parses():
     cfg = ChainConfig.model_validate(
         {
-            "chain": {"id": "gold_pnl", "name": "Gold PnL"},
+            "chain": {"id": "example_revenue", "name": "Example Revenue"},
             "sources": {
                 "components": [
                     {
-                        "name": "Realized PnL",
-                        "description": "Closed-position profit and loss.",
-                        "code_ref": "gold-pnl-engine",
-                        "output_refs": ["project.dataset.gold_pnl_daily"],
+                        "name": "Settled Revenue",
+                        "description": "Closed-position value movement.",
+                        "code_ref": "example-revenue-engine",
+                        "output_refs": ["project.dataset.example_revenue_daily"],
                     },
-                    {"name": "Unrealized MTM"},
+                    {"name": "Projected Value"},
                 ]
             },
         }
     )
     first, second = cfg.sources.components
-    assert first.name == "Realized PnL"
-    assert first.code_ref == "gold-pnl-engine"
-    assert first.output_refs == ["project.dataset.gold_pnl_daily"]
+    assert first.name == "Settled Revenue"
+    assert first.code_ref == "example-revenue-engine"
+    assert first.output_refs == ["project.dataset.example_revenue_daily"]
     assert second.description == "" and second.code_ref is None
     assert second.output_refs == []
 

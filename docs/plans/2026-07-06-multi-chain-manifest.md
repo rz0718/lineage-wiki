@@ -21,7 +21,7 @@
 Add tests that:
 
 - load a legacy v1 manifest and assert `manifest.version == 2`;
-- assert the migrated entry is available at `manifest.chains["gold_pnl"]`;
+- assert the migrated entry is available at `manifest.chains["example_revenue"]`;
 - round-trip a v2 manifest with two entries;
 - compare equality while ignoring only per-chain `last_run_at` and `okf_git_head`.
 

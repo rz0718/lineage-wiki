@@ -19,8 +19,6 @@ from .conftest import FIXED_NOW, REPO_ROOT
 runner = CliRunner()
 
 EXAMPLE_CONFIG = REPO_ROOT / "chains" / "example.yml"
-GOLD_CONFIG = REPO_ROOT / "chains" / "gold-pnl.yml"
-REFERENCE_REPO = REPO_ROOT.parent / "llm-wiki-dataproducts"
 
 HAND_PAGE = (
     "---\ntype: Framework\ntitle: Mine\ndescription: Hand-written.\n---\n"
@@ -261,58 +259,3 @@ def test_update_run_reports_diff_summary(tmp_path, example_cfg):
     assert result.updated
     rel = result.updated[0]
     assert "line(s); sections:" in result.diffs[rel]
-
-
-# --- the real Gold PnL workflow ---------------------------------------------------
-
-
-def test_gold_pnl_config_parses():
-    cfg = load_config(GOLD_CONFIG)
-    assert cfg.chain.slug == "gold-pnl"
-    assert cfg.sources.bigquery and not cfg.sources.bigquery.required
-    assert cfg.generation.overwrite_policy == "update_existing"
-    assert cfg.generation.preserve_manual_sections
-
-    spec = cfg.bigquery_verification
-    assert spec.enabled and spec.mode == "formula_check"
-    names = [c.name for c in spec.formula_checks.checks]
-    assert names == ["gold_daily_total_formula", "gold_futures_daily_total_formula"]
-    total = spec.formula_checks.checks[0]
-    assert total.table.endswith("treasury_da.gold_pnl_daily_snapshot")
-    assert total.expression == "spot_daily_total_idr"
-    assert "spot_unrealized_change_idr" in total.expected_expression
-
-
-@pytest.mark.skipif(
-    not (REFERENCE_REPO / "okf" / "frameworks" / "gold-pnl.md").exists(),
-    reason="reference OKF repo not checked out next to lineage-wiki",
-)
-def test_dry_run_against_reference_repo_is_read_only():
-    okf_before = _tree_state(REFERENCE_REPO / "okf")
-    assert not (REFERENCE_REPO / ".lineage-wiki").exists()
-
-    result = runner.invoke(
-        app,
-        [
-            "generate",
-            "--config", str(GOLD_CONFIG),
-            "--target-repo", str(REFERENCE_REPO),
-            "--dry-run",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    assert _tree_state(REFERENCE_REPO / "okf") == okf_before
-    assert not (REFERENCE_REPO / ".lineage-wiki").exists()
-
-    # Every hand-written Gold PnL page is protected, never rewritten.
-    for rel in [
-        "okf/frameworks/gold-pnl.md",
-        "okf/outputs/gold-pnl-daily-snapshot.md",
-        "okf/code-links/gold-pnl-engine.md",
-        "okf/change-checks/gold-pnl-review-rules.md",
-    ]:
-        assert f"protected {rel}" in result.output
-    assert "protected okf/index.md" in result.output
-    # The one genuinely missing page would be created.
-    assert "create    okf/metrics/gold-daily-total-pnl.md" in result.output
-    assert "would verify `bem---beli-emas-murni.treasury_da.gold_pnl_daily_snapshot`" in result.output

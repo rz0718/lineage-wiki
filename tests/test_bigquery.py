@@ -330,7 +330,7 @@ def test_update_reacts_to_schema_change_and_noops_otherwise(
 
     # A real schema change -> the output page (and framework) get rewritten.
     data["tables"][SNAPSHOT_TABLE]["columns"].append(
-        {"name": "hedge_value", "type": "NUMERIC", "description": "Hedged value."}
+        {"name": "adjustment_value", "type": "NUMERIC", "description": "Adjustment value."}
     )
     fixtures.write_text(yaml.safe_dump(data))
     result = run_update(example_cfg, wiki_root, now=FIXED_NOW)
@@ -338,7 +338,7 @@ def test_update_reacts_to_schema_change_and_noops_otherwise(
     assert SNAPSHOT_TABLE in result.changes.bigquery
     assert "okf/outputs/example-daily-snapshot.md" in result.updated
     output = (wiki_root / "okf" / "outputs" / "example-daily-snapshot.md").read_text()
-    assert "| `hedge_value` | NUMERIC | NULLABLE | Hedged value. |" in output
+    assert "| `adjustment_value` | NUMERIC | NULLABLE | Adjustment value. |" in output
 
 
 def test_update_preserves_schema_docs_when_optional_bigquery_is_unavailable(

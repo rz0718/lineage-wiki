@@ -9,33 +9,33 @@ from lineage_wiki.okf.schemas import (
 def test_render_and_parse_round_trip():
     fm = {
         "type": "Framework",
-        "title": "Gold PnL Framework",
-        "description": "End-to-end Gold PnL computation methodology.",
-        "owner": "Treasury",
+        "title": "Example Revenue Framework",
+        "description": "End-to-end Example Revenue computation methodology.",
+        "owner": "Data Team",
         "status": "draft",
-        "tags": ["gold", "pnl"],
+        "tags": ["example", "revenue"],
         "timestamp": "2026-07-03T00:00:00Z",
         "implementation_refs": [
             {
-                "repo": "gold-pnl",
+                "repo": "example-revenue",
                 "primary": True,
                 "ref": "main",
                 "path": "/",
-                "code_link": "../code-links/gold-pnl-engine.md",
+                "code_link": "../code-links/example-revenue-engine.md",
             }
         ],
-        "change_check": "../change-checks/gold-pnl-review-rules.md",
+        "change_check": "../change-checks/example-revenue-review-rules.md",
         "approved_by": None,
     }
     text = render_frontmatter(fm) + "\n# Body\n"
     parsed = parse_page(text)
     assert parsed.fm_error is None
     assert parsed.frontmatter["type"] == "Framework"
-    assert parsed.frontmatter["tags"] == ["gold", "pnl"]
+    assert parsed.frontmatter["tags"] == ["example", "revenue"]
     assert parsed.frontmatter["implementation_refs"][0]["primary"] is True
     assert (
         parsed.frontmatter["implementation_refs"][0]["code_link"]
-        == "../code-links/gold-pnl-engine.md"
+        == "../code-links/example-revenue-engine.md"
     )
     assert parsed.frontmatter["approved_by"] is None
     assert parsed.body.strip() == "# Body"
@@ -70,12 +70,12 @@ def test_parse_page_reports_bad_yaml():
 
 def test_okf_page_model_defaults():
     page = OkfPage(
-        id="gold-wac",
-        slug="gold-wac",
+        id="example-average-cost",
+        slug="example-average-cost",
         type="Component",
-        title="Gold WAC",
-        description="Weighted average cost.",
-        body="# Gold WAC\n",
+        title="example Average Cost",
+        description="Weighted average cost placeholder.",
+        body="# example Average Cost\n",
     )
     assert page.status == "draft"
     assert page.tags == []

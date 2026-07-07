@@ -17,12 +17,12 @@ Add explicit, manually maintained component entries to the chain config:
 ```yaml
 sources:
   components:
-    - name: Realized PnL
-      description: Closed-position profit and loss.
-      code_ref: gold-pnl-engine
+    - name: Settled Revenue
+      description: Closed-position value movement.
+      code_ref: example-revenue-engine
       output_refs:
-        - project.dataset.gold_pnl_daily
-    - name: Unrealized MTM
+        - project.dataset.example_revenue_daily
+    - name: Projected Value
       description: Mark-to-market valuation for open positions.
 ```
 

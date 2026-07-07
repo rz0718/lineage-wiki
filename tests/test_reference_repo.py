@@ -11,7 +11,7 @@ import pytest
 
 from lineage_wiki.okf.validator import validate_tree
 
-REFERENCE = Path(__file__).resolve().parents[2] / "llm-wiki-dataproducts"
+REFERENCE = Path(__file__).resolve().parents[2] / "example-okf-catalog"
 
 
 @pytest.mark.skipif(not REFERENCE.exists(), reason="reference repo not checked out")

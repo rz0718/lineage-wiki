@@ -48,25 +48,24 @@ uv run lineage-wiki generate --config chains/another-chain.yml --root /path/to/w
 uv run lineage-wiki validate --root /path/to/wiki-repo
 ```
 
-Validate an existing OKF catalog (e.g. the reference repo):
+Validate an existing OKF catalog:
 
 ```bash
-uv run lineage-wiki validate --root ../llm-wiki-dataproducts
+uv run lineage-wiki validate --root /path/to/wiki-repo
 ```
 
 ## Dry-run workflow against an existing OKF repo
 
-`chains/gold-pnl.yml` is a real chain config for the Gold PnL vertical of
-the reference catalog. Preview everything without touching the repo:
+Preview a chain generation run without touching the target repo:
 
 ```bash
-uv run lineage-wiki generate --config chains/gold-pnl.yml \
-  --target-repo ../llm-wiki-dataproducts --dry-run
+uv run lineage-wiki generate --config chains/example.yml \
+  --target-repo /path/to/wiki-repo --dry-run
 
 # Same, with mocked BigQuery schema evidence (no credentials needed):
-LINEAGE_WIKI_BQ_FIXTURES=tests/fixtures/gold_pnl_schemas.yml \
-  uv run lineage-wiki generate --config chains/gold-pnl.yml \
-  --target-repo ../llm-wiki-dataproducts --dry-run
+LINEAGE_WIKI_BQ_FIXTURES=tests/fixtures/bigquery_schemas.yml \
+  uv run lineage-wiki generate --config chains/example.yml \
+  --target-repo /path/to/wiki-repo --dry-run
 ```
 
 The dry run prints the pages that would be created or updated (with diff
@@ -177,7 +176,7 @@ rejected). Each check renders one fixed query:
 ```sql
 SELECT
   COUNT(*) AS checked_rows,
-  COUNTIF(ABS((total_pnl) - (realized_pnl + unrealized_mtm + hedge_pnl)) > 0.01) AS mismatch_rows
+  COUNTIF(ABS((total_value) - (component_a + component_b + component_c)) > 0.01) AS mismatch_rows
 FROM `<table>`
 WHERE `snapshot_date` >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
 ```
@@ -339,7 +338,6 @@ lineage_wiki/
     bq_profiler.py  safe aggregate profiling (query templates + clients)
     bq_formula_verifier.py deterministic formula checks + classification
 chains/example.yml  example chain config
-chains/gold-pnl.yml real Gold PnL chain config for ../llm-wiki-dataproducts
 tests/              unit + snapshot tests
 ```
 

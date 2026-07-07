@@ -137,8 +137,8 @@ def test_unsafe_expression_rejected_at_config_load(tmp_path):
 
 
 def test_extract_identifiers_skips_functions():
-    ids = extract_identifiers("ABS(realized_pnl + unrealized_mtm) * 2 + ROUND(x, 2)")
-    assert ids == {"realized_pnl", "unrealized_mtm", "x"}
+    ids = extract_identifiers("ABS(component_a + component_b) * 2 + ROUND(x, 2)")
+    assert ids == {"component_a", "component_b", "x"}
 
 
 # --- SQL rendering (snapshot tests) ---------------------------------------------------

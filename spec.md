@@ -41,7 +41,7 @@ human notes, optional
 ```
 
 Then it should generate or update a structured OKF knowledge bundle under
-`okf/`, following the existing catalog in `llm-wiki-dataproducts`.
+`okf/`, following the existing catalog in `example-okf-catalog`.
 
 The output is Markdown files with YAML frontmatter, internal links, source
 citations, gaps, divergences, and validation rules.
@@ -67,17 +67,17 @@ formula, source code path, and source methodology.
 
 ### Knowledge Catalog Reference
 
-Use `llm-wiki-dataproducts/` as the canonical OKF output reference.
+Use `example-okf-catalog/` as the canonical OKF output reference.
 
 Important files:
 
 ```text
-llm-wiki-dataproducts/README.md
-llm-wiki-dataproducts/OPERATION.md
-llm-wiki-dataproducts/scripts/validate_okf.py
-llm-wiki-dataproducts/okf/index.md
-llm-wiki-dataproducts/okf/frameworks/gold-pnl.md
-llm-wiki-dataproducts/okf/frameworks/gold-dynamic-spread.md
+example-okf-catalog/README.md
+example-okf-catalog/OPERATION.md
+example-okf-catalog/scripts/validate_okf.py
+example-okf-catalog/okf/index.md
+example-okf-catalog/okf/frameworks/example-revenue.md
+example-okf-catalog/okf/frameworks/example-spread.md
 ```
 
 Reference output directories:
@@ -97,8 +97,8 @@ raw_files/
 
 Reference verticals:
 
-- Gold PnL
-- Gold Dynamic Spread
+- Example Revenue
+- Example Spread
 
 The generated files should look like the existing catalog, including
 frontmatter key names, title-cased page types, index maintenance, verification
@@ -141,19 +141,19 @@ It should support:
 
 ```bash
 lineage-wiki init
-lineage-wiki generate --config chains/gold-pnl.yml
-lineage-wiki update --config chains/gold-pnl.yml
+lineage-wiki generate --config chains/example.yml
+lineage-wiki update --config chains/example.yml
 lineage-wiki validate
-lineage-wiki inspect --chain gold-pnl
-lineage-wiki verify-bq --config chains/gold-pnl.yml
+lineage-wiki inspect --chain example-revenue
+lineage-wiki verify-bq --config chains/example.yml
 lineage-wiki configure
 ```
 
 Optional one-shot mode, borrowed from OpenWiki:
 
 ```bash
-lineage-wiki -p "inspect gold pnl lineage"
-lineage-wiki --print --config chains/gold-pnl.yml "generate missing report mappings"
+lineage-wiki -p "inspect example revenue lineage"
+lineage-wiki --print --config chains/example.yml "generate missing report mappings"
 ```
 
 MVP should focus on one chain/data-product vertical at a time.
@@ -161,7 +161,7 @@ MVP should focus on one chain/data-product vertical at a time.
 Example:
 
 ```bash
-lineage-wiki generate --config chains/gold-pnl.yml
+lineage-wiki generate --config chains/example.yml
 ```
 
 This should create or update:
@@ -220,48 +220,48 @@ Each chain should be described by a YAML config file.
 
 ```yaml
 chain:
-  id: gold_pnl
-  slug: gold-pnl
-  name: Gold PnL
+  id: example_revenue
+  slug: example-revenue
+  name: Example Revenue
   domain: financial_data_product
-  owner: Treasury
-  description: End-to-end PnL calculation framework for gold products.
+  owner: Data Team
+  description: End-to-end revenue calculation framework for example products.
 
 sources:
   raw_docs:
-    - path: raw_files/goldpnl/GoldPNLDoc.md
+    - path: raw_files/example/ExampleMethodology.md
       type: methodology
       required: false
 
   repos:
-    - name: gold-pnl
+    - name: example-revenue
       host: github
-      url: git@github.com:rz0718/gold-pnl.git
+      url: git@github.com:example-org/example-revenue.git
       branch: main
-      local_path: ../gold-pnl
+      local_path: ../example-revenue
       paths:
-        - main_pnl.py
-        - gold_pnl_utils.py
-        - futures_hedging_pnl_report.py
+        - main.py
+        - example_revenue_utils.py
+        - adjustment_report.py
       symbols:
-        - calculate_framework_pnl_wac
-        - load_filtered_transactions_for_pnl
+        - calculate_framework_metric
+        - load_source_transactions
       required: true
 
   bigquery:
-    project: bem---beli-emas-murni
+    project: example-project
     datasets:
-      - treasury_da
-      - gold_production
-      - pluang_forex
+      - analytics
+      - core
+      - fx_rates
     tables:
-      - bem---beli-emas-murni.treasury_da.gold_pnl_daily_snapshot
-      - bem---beli-emas-murni.treasury_da.gold_spread_revenue_spread_cost
+      - example-project.analytics.example_revenue_daily_snapshot
+      - example-project.analytics.example_spread_daily
     include_sample_rows: false
     required: true
 
   reports:
-    - name: Gold Daily PnL Report
+    - name: Example Daily Revenue Report
       type: slack_or_dashboard
       url: ""
       source_mapping_notes: ""
@@ -273,7 +273,7 @@ sources:
 
 generation:
   output_dir: okf
-  raw_files_dir: raw_files/goldpnl
+  raw_files_dir: raw_files/example
   overwrite_policy: update_existing
   create_missing_metrics: true
   update_indexes: true
@@ -356,34 +356,34 @@ values are title-cased human labels, not lowercase enum values.
 ```yaml
 ---
 type: Framework
-title: Gold PnL Framework
-description: End-to-end Gold PnL computation methodology, covering scope, formulas, components, implementation, and output lineage.
-owner: Treasury
+title: Example Revenue Framework
+description: End-to-end Example Revenue computation methodology, covering scope, formulas, components, implementation, and output lineage.
+owner: Data Team
 status: draft
 tags:
-  - gold
-  - pnl
+  - example
+  - revenue
   - framework
   - methodology
 timestamp: 2026-07-03T00:00:00Z
 source_refs:
-  - ../../raw_files/goldpnl/GoldPNLDoc.md
+  - ../../raw_files/example/ExampleMethodology.md
 component_refs:
-  - ../components/gold-wac.md
+  - ../components/example-average-cost.md
 implementation_refs:
-  - repo: gold-pnl
+  - repo: example-revenue
     primary: true
     ref: main
     path: /
-    code_link: ../code-links/gold-pnl-engine.md
+    code_link: ../code-links/example-revenue-engine.md
 output_refs:
   - system: bigquery
     primary: true
-    table: bem---beli-emas-murni.treasury_da.gold_pnl_daily_snapshot
-    output: ../outputs/gold-pnl-daily-snapshot.md
+    table: example-project.analytics.example_revenue_daily_snapshot
+    output: ../outputs/example-revenue-daily-snapshot.md
 report_refs:
-  - ../report-templates/gold-daily-pnl-report.md
-change_check: ../change-checks/gold-pnl-review-rules.md
+  - ../report-templates/example-daily-revenue-report.md
+change_check: ../change-checks/example-revenue-review-rules.md
 approved_by:
 approval_date:
 review_cycle: on methodology change
@@ -447,7 +447,7 @@ Required sections:
 ## Source
 ```
 
-Use the existing Gold PnL and Gold Dynamic Spread framework pages as the
+Use the existing Example Revenue and Example Spread framework pages as the
 reference style. If a section does not apply, keep the heading and state why.
 
 #### `Component`
@@ -672,7 +672,7 @@ Per important fact, the generated OKF should classify the result:
 | Missing evidence | Add a Known Gap and do not infer the answer                                   |
 
 
-The Gold Dynamic Spread vertical is the reference: source-doc gaps and stale
+The Example Spread vertical is the reference: source-doc gaps and stale
 claims are resolved from code/BigQuery, while the 18% internal cap vs 10%
 Trading Rules disclosure remains an open business conflict.
 
@@ -835,26 +835,26 @@ Manifest example:
 
 ```yaml
 version: 1
-chain_id: gold_pnl
-chain_slug: gold-pnl
+chain_id: example_revenue
+chain_slug: example-revenue
 output_dir: okf
 generated_files:
-  - okf/frameworks/gold-pnl.md
-  - okf/components/gold-wac.md
-  - okf/outputs/gold-pnl-daily-snapshot.md
+  - okf/frameworks/example-revenue.md
+  - okf/components/example-average-cost.md
+  - okf/outputs/example-revenue-daily-snapshot.md
 managed_indexes:
   - okf/index.md
   - okf/frameworks/index.md
 source_fingerprints:
   repos:
-    gold-pnl:
+    example-revenue:
       ref: main
       git_head: 0d0f748
       paths_hash: sha256:...
   bigquery:
-    bem---beli-emas-murni.treasury_da.gold_pnl_daily_snapshot: sha256:...
+    example-project.analytics.example_revenue_daily_snapshot: sha256:...
   raw_docs:
-    raw_files/goldpnl/GoldPNLDoc.md: sha256:...
+    raw_files/example/ExampleMethodology.md: sha256:...
 last_run_at: 2026-07-03T12:00:00+08:00
 last_content_snapshot: sha256:...
 ```
@@ -865,12 +865,12 @@ Run metadata example:
 {
   "updatedAt": "2026-07-03T12:00:00+08:00",
   "command": "update",
-  "chainId": "gold_pnl",
+  "chainId": "example_revenue",
   "model": "<configured-model-id>",
   "okfGitHead": "abc123",
   "contentChanged": true,
   "createdFiles": [],
-  "updatedFiles": ["okf/outputs/gold-pnl-daily-snapshot.md"],
+  "updatedFiles": ["okf/outputs/example-revenue-daily-snapshot.md"],
   "gaps": 1,
   "divergences": 2
 }
@@ -917,7 +917,7 @@ Start here:
 - [OKF index](okf/index.md)
 
 When working on data products, formulas, BigQuery tables, dashboards, risk
-definitions, PnL methodology, spread methodology, treasury definitions, or
+definitions, revenue methodology, spread methodology, data definitions, or
 liquidity definitions:
 
 1. Start from `okf/index.md`.
@@ -950,7 +950,7 @@ Support at least:
 
 Do not read or print secret values.
 
-### `lineage-wiki generate --config chains/gold-pnl.yml`
+### `lineage-wiki generate --config chains/example.yml`
 
 Creates the first OKF vertical from configured sources.
 
@@ -960,7 +960,7 @@ If pages already exist, behavior depends on `overwrite_policy`:
 - `update_existing`: preserve human-managed content where possible and print
 a diff summary.
 
-### `lineage-wiki update --config chains/gold-pnl.yml`
+### `lineage-wiki update --config chains/example.yml`
 
 Updates existing OKF pages by comparing:
 
@@ -1012,7 +1012,7 @@ The current catalog already has `scripts/validate_okf.py`, which checks
 frontmatter and relative Markdown links. The MVP can vendor, wrap, or extend
 that behavior rather than replacing it.
 
-### `lineage-wiki verify-bq --config chains/gold-pnl.yml`
+### `lineage-wiki verify-bq --config chains/example.yml`
 
 Runs optional BigQuery verification for configured tables and formulas. This
 command is separate from offline OKF validation because it may require
@@ -1041,7 +1041,7 @@ The command should:
 9. Record optional missing BigQuery evidence as a Known Gap rather than
    failing the whole run.
 
-### `lineage-wiki inspect --chain gold-pnl`
+### `lineage-wiki inspect --chain example-revenue`
 
 Prints a lineage summary:
 
@@ -1146,7 +1146,7 @@ Example check:
 ```sql
 SELECT
   COUNT(*) AS checked_rows,
-  COUNTIF(ABS(total_pnl - (realized_pnl + unrealized_mtm + hedge_pnl)) > 0.01)
+  COUNTIF(ABS(total_value - (component_a + component_b + component_c)) > 0.01)
     AS mismatch_rows
 FROM `<table>`
 WHERE snapshot_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
@@ -1193,10 +1193,10 @@ bigquery_verification:
       absolute: 0.01
       relative: 0.0001
     checks:
-      - name: total_pnl_formula
-        table: bem---beli-emas-murni.treasury_da.gold_pnl_daily_snapshot
-        expression: total_pnl
-        expected_expression: realized_pnl + unrealized_mtm + hedge_pnl
+      - name: total_value_formula
+        table: example-project.analytics.example_revenue_daily_snapshot
+        expression: total_value
+        expected_expression: component_a + component_b + component_c
         date_column: snapshot_date
         tolerance_absolute: 0.01
 
@@ -1236,7 +1236,7 @@ Verified from BigQuery schema and aggregate profiling.
 
 - Required columns are present.
 - Table grain appears to be daily by `snapshot_date`.
-- Formula check for `total_pnl = realized_pnl + unrealized_mtm + hedge_pnl`
+- Formula check for `total_value = component_a + component_b + component_c`
   passed within configured tolerance.
 - Detailed verification result is stored in `.lineage-wiki/runs/<run-id>.json`.
 ```
@@ -1401,7 +1401,7 @@ Format documentation for data products. It should borrow OpenWiki's product
 mechanics (init/update modes, git-aware updates, provider configuration,
 agent instruction insertion, no-op metadata behavior, scheduled PR workflow)
 but it must use Python and the OKF output structure from
-`llm-wiki-dataproducts`.
+`example-okf-catalog`.
 
 The tool takes a chain-level YAML config containing BigQuery tables,
 GitHub/local code references, optional raw documentation, optional report
@@ -1476,12 +1476,12 @@ Use Typer or Click for CLI.
 Use Pydantic for config/schema validation.
 Use Jinja2 or plain templates for Markdown generation.
 Use PyYAML for YAML.
-Use the behavior from `llm-wiki-dataproducts/scripts/validate_okf.py` as the
+Use the behavior from `example-okf-catalog/scripts/validate_okf.py` as the
 baseline validator and extend it where needed.
 
 # Required behavior
 
-1. Generate OKF pages matching the existing `llm-wiki-dataproducts` style.
+1. Generate OKF pages matching the existing `example-okf-catalog` style.
 2. Maintain all relevant `index.md` files.
 3. Store source fingerprints and generated-file metadata in
   `.lineage-wiki/manifest.yml`.
