@@ -30,7 +30,9 @@ Small but complete:
 - one methodology doc (a rough export dumped to Markdown is fine);
 - one repo with a local clone;
 - 1–3 BigQuery tables;
-- one report people actually read;
+- one report people actually read — a daily Slack alert is ideal, since the
+  Slack connector can pull its live text onto the report page (you need the
+  channel id and a bot token with a history scope);
 - an owner who will answer questions.
 
 Prefer a chain with a **suspected doc-vs-code discrepancy** — a known-stale
@@ -56,7 +58,12 @@ honest:
 - the methodology file under `raw_files/<chain>/`;
 - the repo `local_path` with a handful of `paths:` and the 2–3 `symbols:`
   that compute the core numbers;
-- real table names under `sources.bigquery.tables`.
+- real table names under `sources.bigquery.tables`;
+- if the report is a Slack alert, a `sources.slack` entry (channel id,
+  `match_text` the alert always contains, `report:` naming the
+  `sources.reports` entry) with `SLACK_BOT_TOKEN` exported — the newest
+  matching message gets quoted on the report page and a new alert triggers a
+  surgical update.
 
 Set everything `required: false` initially so missing pieces become Known
 Gaps instead of failures — the gap list is diagnostic output at this stage,
@@ -198,9 +205,12 @@ unused wikis rot regardless of tooling.
 
 ## 3. Report connector
 
-Currently a stub (name, URL, empty notes), yet reports are where humans start
-their questions. Even a manual-but-structured mapping format
-(report line item → `table.column`) makes the reverse chain real.
+Partially built: the Slack connector (`sources.slack`) now ingests the live
+alert text — newest message matching `match_text`, plus thread replies — as
+fingerprinted evidence quoted on the linked report page, so a new alert
+triggers a surgical update. Still missing is the structured mapping format
+(report line item → `table.column`) that makes the reverse chain real, and
+connectors for non-Slack surfaces (dashboards, spreadsheets).
 
 ## System health metric
 

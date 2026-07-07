@@ -177,6 +177,40 @@ Tables are configured under `sources.bigquery.tables` as
 as Known Gaps and the run succeeds; `required: true` fails the run with a
 clear error. A missing individual table follows the same rule.
 
+## Slack report evidence
+
+Read-only, always: the connector calls `conversations.history` (and
+`conversations.replies` for threads) and never posts. For each
+`sources.slack` entry, the newest message in `channel_id` whose text contains
+`match_text` (within `lookback_hours`) is quoted under `## Slack Evidence` on
+the report page named by `report:` and fingerprinted so a new alert message
+triggers a surgical update of that page.
+
+**With mocked messages** (no token needed) — point
+`LINEAGE_WIKI_SLACK_FIXTURES` at a YAML/JSON file mapping channel ids to
+message lists (see `tests/fixtures/slack_messages.yml`):
+
+```bash
+LINEAGE_WIKI_SLACK_FIXTURES=tests/fixtures/slack_messages.yml \
+  uv run lineage-wiki generate --config chains/<chain>.yml --root /path/to/wiki-repo
+```
+
+**Against real Slack** — export a bot token with a history scope for the
+channel (e.g. `channels:history`; `groups:history` for private channels) in
+the environment variable named by `api_token_env` (default `SLACK_BOT_TOKEN`):
+
+```bash
+export SLACK_BOT_TOKEN=xoxb-...   # never written to any file
+uv run lineage-wiki generate --config chains/<chain>.yml --root /path/to/wiki-repo
+```
+
+**When Slack is unavailable** (no token, API error, or
+`LINEAGE_WIKI_SLACK_OFFLINE=1`): `required: false` records the missing alert
+text as a Known Gap and the run succeeds; `required: true` fails the run with
+a clear error — as does a required source with no matching message. During an
+outage, `update` preserves the prior message fingerprint (with a warning)
+instead of churning the report page.
+
 ## BigQuery verification (`verify-bq`)
 
 Controlled by the `bigquery_verification` block in the chain config (see
