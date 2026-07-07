@@ -1,21 +1,43 @@
 # Lineage Wiki
 
-**OpenWiki for data products**: a Python CLI that turns BigQuery schemas,
-source code, raw methodology, and dashboard/report mappings into a
-git-backed Open Knowledge Format (OKF) knowledge graph.
+**Evidence-reconciled OKF for data products.**
 
-Milestones 1–4 ship the deterministic core — no LLM, no network. Local
+Lineage Wiki turns BigQuery schemas, source code, methodology docs, report
+mappings, and human notes into a git-backed Markdown knowledge graph. It sits
+in the same broad family as OpenWiki and LLM Wiki tools: plain Markdown pages
+that humans can review and agents can read. Its difference is the knowledge
+contract: the wiki is not a place where knowledge is invented; it is a place
+where evidence is reconciled.
+
+Every published fact must trace to an `EvidenceItem`. Missing evidence becomes
+a Known Gap. Conflicts between docs, code, schemas, and reports become Known
+Doc-vs-Code Divergences. Optional LLM extraction is treated as untrusted input:
+claims are dropped unless they cite real evidence with verbatim support. The
+result is an Open Knowledge Format (OKF) catalog that refuses plausible prose
+when the evidence is not there.
+
+Use it to:
+
+- trace a report line item back to BigQuery columns, component formulas, code
+  paths, source methodology, and owner notes;
+- expose stale docs, implementation drift, and genuine doc-vs-code conflicts;
+- keep data-product documentation current by fingerprinting evidence and
+  rewriting only affected tool-owned pages;
+- give LLM agents a citable, validated context layer instead of a pile of stale
+  docs.
+
+The project already ships a deterministic core: no LLM, no network. Local
 evidence (raw methodology docs and local repo clones) is ingested into
-normalized `EvidenceItem`s; configured symbols are located in the loaded
-code; unavailable optional sources become Known Gaps and missing
-`required: true` sources fail clearly.
+normalized `EvidenceItem`s; configured symbols are located in the loaded code;
+unavailable optional sources become Known Gaps and missing `required: true`
+sources fail clearly.
 
-Milestone 5 adds **schema-only BigQuery ingestion**: table metadata and
-schemas (columns, types, descriptions, partitioning, clustering, table vs
-view, view SQL, last-modified) are loaded for the tables configured under
-`sources.bigquery.tables`, normalized into evidence, fingerprinted for
-update diffing, and rendered into the output pages. The connector never
-runs queries — no SELECT statements, no row reads, no live data values.
+It also ships **schema-only BigQuery ingestion**: table metadata and schemas
+(columns, types, descriptions, partitioning, clustering, table vs view, view
+SQL, last-modified) are loaded for the tables configured under
+`sources.bigquery.tables`, normalized into evidence, fingerprinted for update
+diffing, and rendered into the output pages. The connector never runs queries:
+no SELECT statements, no row reads, no live data values.
 
 Commands:
 
