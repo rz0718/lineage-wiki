@@ -58,7 +58,21 @@ on the next content-changing run.
 ## Install
 
 ```bash
-uv sync --extra dev            # or: pip install -e '.[dev]'
+uv sync
+uv run lineage-wiki --help
+```
+
+For development and tests:
+
+```bash
+uv sync --extra dev
+uv run pytest
+```
+
+For real BigQuery access:
+
+```bash
+uv sync --extra bigquery
 ```
 
 ## Quick start
