@@ -15,6 +15,10 @@ source change since the last run?"
   table identity, so unavailable runs stay no-op-stable and schemas register
   as a change the first time they load.
 - reports: hash of the configured report mapping (name/type/url/notes).
+- slack: hash of the newest matching channel message (ts + text + thread
+  replies). When Slack is unavailable the fingerprint preserves the prior
+  value (like BigQuery), so outages stay no-op-stable and a new alert
+  message registers as a change the next time it loads.
 - config: hash of the scaffold-relevant chain config (everything except
   ``model`` and ``validation``, which do not affect deterministic output).
 """
@@ -122,10 +126,52 @@ def fingerprint_bigquery(
     return fingerprints, []
 
 
+def fingerprint_slack(
+    sources,
+    previous: dict[str, str] | None = None,
+    loads: list | None = None,
+) -> tuple[dict[str, str], list[str]]:
+    """``loads`` reuses already-fetched SlackLoadResults (the ones the pages
+    were rendered from) instead of fetching again — a manifest must never
+    record a newer message than the page content it describes."""
+    # Imported here for the same reason as the BigQuery connector above.
+    from ..connectors.slack_connector import load_slack_sources
+
+    # Base value: the configured identity, so config edits register even
+    # when no message ever matched.
+    fingerprints = {s.name: _sha_obj(s.model_dump()) for s in sources}
+    warnings: list[str] = []
+    if loads is None:
+        loads = load_slack_sources(sources, enforce_required=False)
+    for load in loads:
+        name = load.source.name
+        if not load.available:
+            detail = f" ({load.unavailable_reason})" if load.unavailable_reason else ""
+            if previous and name in previous:
+                fingerprints[name] = previous[name]
+                warnings.append(
+                    f"Slack source `{name}` unavailable{detail}; preserved "
+                    "its prior fingerprint"
+                )
+            else:
+                warnings.append(f"Slack source `{name}` unavailable{detail}")
+        elif load.item is not None:
+            fingerprints[name] = load.item.fingerprint
+        else:
+            # Loaded fine but nothing matched: distinct from the config-only
+            # base so a match expiring out of the lookback window registers.
+            fingerprints[name] = _sha_obj(
+                {"source": load.source.model_dump(), "no_match": True}
+            )
+    return fingerprints, warnings
+
+
 def compute_fingerprint_result(
     cfg: ChainConfig,
     root: str | Path,
     previous: SourceFingerprints | None = None,
+    *,
+    slack_loads: list | None = None,
 ) -> FingerprintComputation:
     root = Path(root)
     bigquery = {}
@@ -135,22 +181,32 @@ def compute_fingerprint_result(
             cfg.sources.bigquery,
             previous.bigquery if previous is not None else None,
         )
+    slack = {}
+    if cfg.sources.slack:
+        slack, slack_warnings = fingerprint_slack(
+            cfg.sources.slack,
+            previous.slack if previous is not None else None,
+            slack_loads,
+        )
+        warnings = warnings + slack_warnings
     # bigquery_verification is excluded too: verify-bq settings do not
     # affect deterministic page output, so tuning them must not register
     # as a chain-config change.
     config_dump = cfg.model_dump(exclude={"model", "validation", "bigquery_verification"})
-    if not config_dump["sources"]["components"]:
-        # `sources.components` postdates existing manifests; hashing its
-        # empty default would flag `chain config changed` forever on
-        # pre-components manifests (no content change ever rewrites the
-        # stored fingerprint). Dropping the empty key keeps legacy hashes
-        # stable while configuring a component still registers as a change.
-        del config_dump["sources"]["components"]
+    for key in ("components", "slack"):
+        if not config_dump["sources"][key]:
+            # These sources postdate existing manifests; hashing their empty
+            # defaults would flag `chain config changed` forever on older
+            # manifests (no content change ever rewrites the stored
+            # fingerprint). Dropping the empty keys keeps legacy hashes
+            # stable while configuring one still registers as a change.
+            del config_dump["sources"][key]
     return FingerprintComputation(SourceFingerprints(
         repos={repo.name: fingerprint_repo(root, repo) for repo in cfg.sources.repos},
         bigquery=bigquery,
         raw_docs={doc.path: fingerprint_raw_doc(root, doc.path) for doc in cfg.sources.raw_docs},
         reports={r.name: _sha_obj(r.model_dump()) for r in cfg.sources.reports},
+        slack=slack,
         config=_sha_obj(config_dump),
     ), warnings)
 
@@ -159,5 +215,9 @@ def compute_fingerprints(
     cfg: ChainConfig,
     root: str | Path,
     previous: SourceFingerprints | None = None,
+    *,
+    slack_loads: list | None = None,
 ) -> SourceFingerprints:
-    return compute_fingerprint_result(cfg, root, previous).fingerprints
+    return compute_fingerprint_result(
+        cfg, root, previous, slack_loads=slack_loads
+    ).fingerprints

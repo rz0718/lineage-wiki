@@ -14,6 +14,7 @@ SourceType = Literal[
     "bigquery_schema",
     "bigquery_sql",
     "report",
+    "slack_message",
     "human_note",
     "git_diff",
 ]

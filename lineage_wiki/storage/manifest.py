@@ -35,8 +35,10 @@ class SourceFingerprints(BaseModel):
     bigquery: dict[str, str] = Field(default_factory=dict)
     raw_docs: dict[str, str] = Field(default_factory=dict)
     # Extensions beyond the spec example, needed for deterministic updates:
-    # report-mapping fingerprints and a hash of the scaffold-relevant config.
+    # report-mapping and Slack-message fingerprints plus a hash of the
+    # scaffold-relevant config.
     reports: dict[str, str] = Field(default_factory=dict)
+    slack: dict[str, str] = Field(default_factory=dict)
     config: str = ""
 
 
@@ -207,11 +209,17 @@ class SourceChanges:
     repos: list[str] = field(default_factory=list)
     bigquery: list[str] = field(default_factory=list)
     reports: list[str] = field(default_factory=list)
+    slack: list[str] = field(default_factory=list)
     config: bool = False
 
     def any(self) -> bool:
         return bool(
-            self.raw_docs or self.repos or self.bigquery or self.reports or self.config
+            self.raw_docs
+            or self.repos
+            or self.bigquery
+            or self.reports
+            or self.slack
+            or self.config
         )
 
     def describe(self) -> list[str]:
@@ -222,6 +230,7 @@ class SourceChanges:
         lines.extend(f"repo `{r}` changed" for r in self.repos)
         lines.extend(f"bigquery table `{t}` changed" for t in self.bigquery)
         lines.extend(f"report `{r}` mapping changed" for r in self.reports)
+        lines.extend(f"slack source `{s}` changed" for s in self.slack)
         return lines
 
 
@@ -239,5 +248,6 @@ def diff_fingerprints(old: SourceFingerprints, new: SourceFingerprints) -> Sourc
         ),
         bigquery=_changed_keys(old.bigquery, new.bigquery),
         reports=_changed_keys(old.reports, new.reports),
+        slack=_changed_keys(old.slack, new.slack),
         config=old.config != new.config,
     )

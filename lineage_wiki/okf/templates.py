@@ -21,6 +21,7 @@ from ..connectors.bigquery_connector import (
     parse_table_name,
 )
 from ..connectors.local_repo_connector import RepoLoadResult
+from ..connectors.slack_connector import SlackLoadResult
 from ..ingestion.code_indexer import CodeIndex, index_repo
 from ..ingestion.evidence import EvidenceItem
 from ..ingestion.source_loader import EvidenceBundle, load_sources
@@ -84,12 +85,22 @@ class _Ctx:
     repo_loads: dict[str, RepoLoadResult] = field(default_factory=dict)
     code_indexes: dict[str, CodeIndex] = field(default_factory=dict)
     bq_load: BigQueryLoadResult | None = None
+    slack_loads: list[SlackLoadResult] = field(default_factory=list)
     gaps: list[str] = field(default_factory=list)
 
     def bq_schema(self, table: str) -> TableSchema | None:
         if self.bq_load is None or not self.bq_load.available:
             return None
         return self.bq_load.schemas.get(table)
+
+    def slack_for_report(self, report_name: str) -> list[SlackLoadResult]:
+        """Slack loads backing the named report (explicit ``report:`` ref or
+        exact name match)."""
+        return [
+            load
+            for load in self.slack_loads
+            if (load.source.report or load.source.name) == report_name
+        ]
 
     def link_from(self, src_dir: str, target_rel: str) -> str:
         """Relative link from a page in okf/<src_dir>/ to another okf page."""
@@ -211,6 +222,7 @@ def _build_ctx(cfg: ChainConfig, root: Path, now: str) -> _Ctx:
     ctx.repo_loads = {load.repo.name: load for load in bundle.repos}
     ctx.code_indexes = {load.repo.name: index_repo(load) for load in bundle.repos}
     ctx.bq_load = bundle.bigquery
+    ctx.slack_loads = bundle.slack
 
     # Deterministic gap register — one entry per fact the scaffold cannot know.
     gaps = ctx.gaps
@@ -286,6 +298,31 @@ def _build_ctx(cfg: ChainConfig, root: Path, now: str) -> _Ctx:
     for report, _, _ in ctx.reports:
         if not report.source_mapping_notes:
             gaps.append(f"Report `{report.name}` has no verified source mapping.")
+    report_names = {report.name for report, _, _ in ctx.reports}
+    for load in ctx.slack_loads:
+        src = load.source
+        if src.report and src.report not in report_names:
+            gaps.append(
+                f"Slack source `{src.name}` names report `{src.report}` which "
+                "is not configured under sources.reports."
+            )
+        elif not src.report and src.name not in report_names:
+            gaps.append(
+                f"Slack source `{src.name}` is not linked to any configured "
+                "report (set its `report:` to a sources.reports name)."
+            )
+        if not load.available:
+            gaps.append(
+                f"Slack source `{src.name}` is unavailable "
+                f"({load.unavailable_reason}); the live alert text has not "
+                "been ingested."
+            )
+        elif load.message is None:
+            gaps.append(
+                f"Slack source `{src.name}` found no message matching "
+                f'"{src.match_text}" in channel `{src.channel_id}` within '
+                f"the last {src.lookback_hours}h."
+            )
     for metric, _ in ctx.metrics:
         if not metric.definition:
             gaps.append(f"Metric `{metric.name}` has no configured definition.")
@@ -927,6 +964,39 @@ Not yet documented — no runtime evidence has been ingested.
 # --- Report Template ----------------------------------------------------------------
 
 
+def _quote(text: str) -> str:
+    return "\n".join(f"> {line}".rstrip() for line in (text.splitlines() or [""]))
+
+
+def _slack_evidence_block(load: SlackLoadResult) -> str:
+    """One report-page block quoting what a Slack source actually said.
+
+    Deliberately date-free apart from the message `ts` itself: the block only
+    changes when the underlying message changes, preserving no-op runs."""
+    src = load.source
+    if not load.available:
+        return (
+            f"Slack source `{src.name}` (channel `{src.channel_id}`) is "
+            f"unavailable: {load.unavailable_reason}. The live alert text "
+            "has not been ingested."
+        )
+    if load.message is None:
+        return (
+            f'No message matching "{src.match_text}" was found in channel '
+            f"`{src.channel_id}` within the last {src.lookback_hours}h "
+            f"(Slack source `{src.name}`)."
+        )
+    block = (
+        f'Newest message matching "{src.match_text}" in channel '
+        f"`{src.channel_id}` (Slack source `{src.name}`, message ts "
+        f"`{load.message.ts}`):\n\n{_quote(load.message.text)}"
+    )
+    if load.replies:
+        reply_quotes = "\n>\n".join(_quote(r.text) for r in load.replies)
+        block += f"\n\nThread replies ({len(load.replies)}):\n\n{reply_quotes}"
+    return block
+
+
 def render_report_page(ctx: _Ctx, report: ReportSource, rel: str, title: str) -> str:
     d = "report-templates"
     fm = _base_fm(
@@ -952,6 +1022,16 @@ def render_report_page(ctx: _Ctx, report: ReportSource, rel: str, title: str) ->
             "No verified source mapping yet — recorded in the framework "
             f"page's [Known Gaps]({framework_link}#known-gaps)."
         )
+
+    # Only rendered when a sources.slack entry backs this report, so chains
+    # without Slack evidence keep their existing page bytes.
+    slack_section = ""
+    slack_loads = ctx.slack_for_report(report.name)
+    if slack_loads:
+        blocks = []
+        for load in slack_loads:
+            blocks.append(_slack_evidence_block(load))
+        slack_section = "## Slack Evidence\n\n" + "\n\n".join(blocks) + "\n\n"
 
     bq_mapping = _bullets(
         [
@@ -984,7 +1064,7 @@ ingested.
 
 {mapping}
 
-## BigQuery Source Mapping
+{slack_section}## BigQuery Source Mapping
 
 The chain's configured BigQuery outputs (line-item to column mapping not yet
 verified):

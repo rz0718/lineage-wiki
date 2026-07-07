@@ -267,6 +267,20 @@ sources:
       source_mapping_notes: ""
       required: false
 
+  # Live Slack alert evidence backing a report page: the newest message in
+  # channel_id whose text contains match_text (within lookback_hours) is
+  # fetched via conversations.history (plus conversations.replies for
+  # threads) and quoted on the linked report page. The bot token is read
+  # from api_token_env at run time and never stored.
+  slack:
+    - name: Example Daily Revenue Slack Alert
+      channel_id: C0123456789
+      match_text: "Example Daily Revenue"
+      lookback_hours: 36
+      report: Example Daily Revenue Report
+      required: false
+      api_token_env: SLACK_BOT_TOKEN
+
   human_notes:
     - title: Review caveat
       content: "Do not treat USD equivalents as source of truth; IDR is canonical."

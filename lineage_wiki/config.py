@@ -93,6 +93,44 @@ class ReportSource(_StrictModel):
     required: bool = False
 
 
+_ENV_VAR_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+class SlackSource(_StrictModel):
+    """One Slack channel alert backing a report page: the newest message in
+    ``channel_id`` whose text contains ``match_text`` (within the lookback
+    window) is ingested as report evidence. ``report`` names the
+    ``sources.reports`` entry the evidence belongs to (defaults to ``name``).
+    The bot token is read from the ``api_token_env`` environment variable at
+    run time and is never stored."""
+
+    name: str
+    channel_id: str
+    match_text: str
+    lookback_hours: int = Field(default=36, gt=0)
+    report: str | None = None
+    thread_replies: bool = True
+    required: bool = False
+    api_token_env: str = "SLACK_BOT_TOKEN"
+
+    @field_validator("name", "channel_id", "match_text")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must be non-empty")
+        return value
+
+    @field_validator("api_token_env")
+    @classmethod
+    def _valid_env_name(cls, value: str) -> str:
+        if not _ENV_VAR_NAME.match(value):
+            raise ValueError(
+                f"api_token_env {value!r} is not an environment variable name "
+                "(expected UPPER_SNAKE_CASE)"
+            )
+        return value
+
+
 class HumanNote(_StrictModel):
     title: str
     content: str
@@ -131,6 +169,7 @@ class SourcesSpec(_StrictModel):
     repos: list[RepoSource] = Field(default_factory=list)
     bigquery: BigQuerySource | None = None
     reports: list[ReportSource] = Field(default_factory=list)
+    slack: list[SlackSource] = Field(default_factory=list)
     human_notes: list[HumanNote] = Field(default_factory=list)
     metrics: list[MetricInput] = Field(default_factory=list)
     components: list[ComponentInput] = Field(default_factory=list)

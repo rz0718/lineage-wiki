@@ -8,6 +8,7 @@ Maps changed evidence to the OKF pages that must be considered:
 | BigQuery schema    | outputs, linked components, framework, report-templates, change-checks |
 | Raw docs           | framework, components, metrics                           |
 | Report mapping     | report-templates, outputs, linked components, framework, change-checks |
+| Slack message      | linked report-template, framework, change-checks         |
 | Chain config       | every page planned for the chain                         |
 
 The plan includes hand-written pages linked to the chain's framework (found
@@ -150,6 +151,18 @@ def build_impact_plan(
             for page in chain_components:
                 if output_rel in page.output_refs:
                     add(page.rel, reason)
+        add(fw, reason)
+        add(ctx.change_check_rel, reason)
+
+    for name in changes.slack:
+        reason = f"slack source `{name}` changed"
+        source = next((s for s in cfg.sources.slack if s.name == name), None)
+        target = (source.report or source.name) if source else name
+        report_rel = next(
+            (rel for r, rel, _ in ctx.reports if r.name == target), None
+        )
+        if report_rel:
+            add(report_rel, reason)
         add(fw, reason)
         add(ctx.change_check_rel, reason)
 

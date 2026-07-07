@@ -300,6 +300,8 @@ def _stale_evidence_ids(cfg: ChainConfig, changes: SourceChanges) -> frozenset[s
             pass
     for name in changes.reports:
         stale.add(f"report:{slugify(name)}")
+    for name in changes.slack:
+        stale.add(f"slack:{slugify(name)}")
     if changes.config:
         # Human notes live in the chain config; a config change may have
         # edited them.
@@ -424,10 +426,14 @@ def _build_manifest(
         generated_files=generated_files,
         managed_indexes=managed_indexes,
         file_snapshots=compute_file_snapshots(contents),
+        # Slack loads are reused from the plan's bundle: the manifest must
+        # fingerprint the message the pages were rendered from, not whatever
+        # newer message a second fetch might return mid-run.
         source_fingerprints=compute_fingerprints(
             cfg,
             fingerprint_root or root,
             previous.source_fingerprints if previous is not None else None,
+            slack_loads=plan.bundle.slack or None,
         ),
         last_run_at=now,
         last_content_snapshot=compute_snapshot(contents),
@@ -534,6 +540,20 @@ def _describe_evidence(cfg: ChainConfig, bundle: EvidenceBundle) -> list[str]:
     for report in bundle.reports:
         mapped = "with source mapping" if report.content else "no source mapping"
         lines.append(f"report `{report.title}` — {mapped}")
+    for load in bundle.slack:
+        src = load.source
+        if not load.available:
+            lines.append(f"slack `{src.name}` — unavailable ({load.unavailable_reason})")
+        elif load.message is None:
+            lines.append(
+                f"slack `{src.name}` — no message matching {src.match_text!r} "
+                f"within {src.lookback_hours}h"
+            )
+        else:
+            line = f"slack `{src.name}` — matched message @ {load.message.ts}"
+            if load.replies:
+                line += f" (+{len(load.replies)} thread replies)"
+            lines.append(line)
     return lines
 
 

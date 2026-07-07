@@ -1,0 +1,24 @@
+# Mocked Slack channel messages — used by unit tests and token-free demo runs:
+#
+#   LINEAGE_WIKI_SLACK_FIXTURES=tests/fixtures/slack_messages.yml \
+#     uv run lineage-wiki generate --config chains/example.yml
+#
+# Message text and identity only. Fixture files must never contain real
+# workspace exports or tokens.
+channels:
+  C0123456789:
+    - ts: "1751000000.000100"
+      text: "Gold PNL Daily: ancient alert (outside every test window)"
+    - ts: "1751851200.000200"
+      text: "Gold PNL Daily: total +10,000 USD"
+    - ts: "1751937600.000300"
+      text: "Gold PNL Daily: total +12,345 USD"
+      user: U0ALERTBOT
+      replies:
+        - ts: "1751937700.000400"
+          text: "breakdown attached"
+        - ts: "1751937800.000500"
+          text: "confirmed vs ledger"
+    - ts: "1751995000.000600"
+      text: "unrelated chatter"
+  C0EMPTY: []

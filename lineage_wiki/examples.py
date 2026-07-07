@@ -62,6 +62,25 @@ sources:
       source_mapping_notes: ""
       required: false
 
+  # Optional Slack alert evidence backing a report page. The newest message
+  # in channel_id whose text contains match_text (within lookback_hours) is
+  # fetched via Slack's conversations.history API — plus
+  # conversations.replies for threads — and quoted on the linked report
+  # page. `report` names the sources.reports entry the evidence belongs to
+  # (defaults to this source's name). The bot token is read from the
+  # api_token_env environment variable at run time (needs a history scope,
+  # e.g. channels:history) and is never stored. Mocked messages: set
+  # LINEAGE_WIKI_SLACK_FIXTURES=<file>; LINEAGE_WIKI_SLACK_OFFLINE=1 treats
+  # Slack as unavailable.
+  # slack:
+  #   - name: Example Daily Slack Alert
+  #     channel_id: C0123456789
+  #     match_text: "Example Daily"
+  #     lookback_hours: 36
+  #     report: Example Daily Report
+  #     required: false
+  #     api_token_env: SLACK_BOT_TOKEN
+
   human_notes:
     - title: Review caveat
       content: "Scaffold example only; replace with a real chain."

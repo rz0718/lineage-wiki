@@ -9,6 +9,7 @@ from ..config import ChainConfig
 from ..connectors.bigquery_connector import BigQueryLoadResult, load_bigquery_schemas
 from ..connectors.local_repo_connector import RepoLoadResult, load_local_repo
 from ..connectors.raw_doc_connector import load_raw_docs
+from ..connectors.slack_connector import SlackLoadResult, load_slack_sources
 from ..util import slugify
 from .evidence import EvidenceItem
 from .fingerprints import sha_bytes
@@ -24,6 +25,7 @@ class EvidenceBundle:
     bigquery: BigQueryLoadResult | None = None
     human_notes: list[EvidenceItem] = field(default_factory=list)
     reports: list[EvidenceItem] = field(default_factory=list)
+    slack: list[SlackLoadResult] = field(default_factory=list)
 
     def repo_load(self, name: str) -> RepoLoadResult | None:
         return next((r for r in self.repos if r.repo.name == name), None)
@@ -36,6 +38,7 @@ class EvidenceBundle:
             items.extend(self.bigquery.items)
         items.extend(self.human_notes)
         items.extend(self.reports)
+        items.extend(load.item for load in self.slack if load.item is not None)
         return items
 
 
@@ -48,6 +51,8 @@ def load_sources(cfg: ChainConfig, root: str | Path) -> EvidenceBundle:
     bundle.repos = [load_local_repo(repo, root) for repo in cfg.sources.repos]
     if cfg.sources.bigquery and cfg.sources.bigquery.tables:
         bundle.bigquery = load_bigquery_schemas(cfg.sources.bigquery)
+    if cfg.sources.slack:
+        bundle.slack = load_slack_sources(cfg.sources.slack)
 
     for note in cfg.sources.human_notes:
         bundle.human_notes.append(

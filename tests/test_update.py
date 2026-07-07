@@ -260,11 +260,12 @@ def test_new_component_config_creates_page(example_cfg, wiki_root):
 
 
 def test_config_fingerprint_unchanged_for_pre_components_manifests(example_cfg, wiki_root):
-    """Manifests written before `sources.components` existed hashed a config
-    dump without that key. A no-components config must keep producing that
-    exact hash, or every legacy manifest would report a phantom
-    `chain config changed` forever (no content change ever advances the
-    stored fingerprint). Configuring a component must still change it."""
+    """Manifests written before `sources.components` / `sources.slack`
+    existed hashed a config dump without those keys. A config using neither
+    must keep producing that exact hash, or every legacy manifest would
+    report a phantom `chain config changed` forever (no content change ever
+    advances the stored fingerprint). Configuring a component must still
+    change it."""
     from lineage_wiki.ingestion.fingerprints import _sha_obj, compute_fingerprints
 
     from .test_templates import component_cfg
@@ -272,7 +273,8 @@ def test_config_fingerprint_unchanged_for_pre_components_manifests(example_cfg, 
     legacy_dump = example_cfg.model_dump(
         exclude={"model", "validation", "bigquery_verification"}
     )
-    del legacy_dump["sources"]["components"]  # the pre-components dump shape
+    for key in ("components", "slack"):  # the legacy dump shape
+        del legacy_dump["sources"][key]
 
     current = compute_fingerprints(example_cfg, wiki_root)
     assert current.config == _sha_obj(legacy_dump)
