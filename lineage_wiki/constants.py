@@ -148,6 +148,12 @@ GENERATED_MARKER = "<!-- generated-by: lineage-wiki -->"
 # scaffold templates.
 PRESERVED_SECTIONS = ("Verification Status", "Known Doc-vs-Code Divergences")
 
+# Every scaffold-written Verification Status body starts with this phrase
+# (see templates._scaffold_note). A Verification Status section that still
+# contains it holds no verify-bq results or human notes, so a rewrite may
+# refresh it instead of preserving stale evidence state.
+SCAFFOLD_STATUS_MARK = "Unverified scaffold"
+
 # --- init scaffolding ---------------------------------------------------------
 
 MANIFEST_DIR = ".lineage-wiki"
@@ -233,13 +239,16 @@ evidence items. Every extracted fact must cite at least one evidence item.
 Write OKF Markdown pages using the catalog's frontmatter style, title-cased
 page types, and required sections for each type. Keep concepts canonical:
 detailed definition in one page, lightweight links elsewhere. Preserve
-existing useful wording when it remains accurate.
+existing useful wording when it remains accurate. Write readable prose:
+never paste raw evidence formatting (table rows, code fragments,
+docstrings, or table-of-contents links) into a section body.
 """,
     "reviewer.md": """\
 # Reviewer Prompt
 
-Review generated pages against the evidence. Reject any formula, column,
-code path, or report behavior that lacks a citation. Confirm required
-sections, resolvable links, and index membership.
+Review the proposed sections against the accepted claims. Reject any
+formula, column, code path, or report behavior that lacks a citation or is
+not supported by a claim. Judge only what you are shown — deterministic
+validation checks links, indexes, and required sections elsewhere.
 """,
 }

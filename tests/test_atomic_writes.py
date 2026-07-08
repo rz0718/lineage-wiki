@@ -146,3 +146,17 @@ def test_unsafe_output_dir_is_rejected_before_any_write(example_cfg, tmp_path):
 
     assert _tree_state(tmp_path) == before
     assert list(outside.iterdir()) == []
+
+
+def test_output_dir_repeating_root_is_normalized(example_cfg, tmp_path):
+    root = tmp_path / "wiki-repo"
+    root.mkdir()
+    cfg = example_cfg.model_copy(deep=True)
+    cfg.generation.output_dir = f"../{root.name}/okf"
+
+    result = run_generate(cfg, root, now=FIXED_NOW)
+
+    assert result.report.failed() is False
+    assert (root / "okf" / "frameworks" / "example-chain.md").exists()
+    assert not (root / root.name).exists()
+    assert cfg.generation.output_dir == f"../{root.name}/okf"

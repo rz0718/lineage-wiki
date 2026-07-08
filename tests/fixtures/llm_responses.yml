@@ -17,6 +17,11 @@
 # - claim c4 (fact citing an unknown evidence id)         -> rejected
 # - claim c5 (code_path with no repo-file evidence)       -> rejected
 # - the output page's section contains SQL                -> rejected
+#
+# Common model sloppiness the pipeline tolerates deterministically:
+# - the writer's Scope body cites the *claim id* (c6)     -> rewritten to the
+#   claim's verified evidence id before grounding
+# - headings echoed with the '## ' Markdown marker        -> normalized
 responses:
   page_planner: |
     {"pages": [
@@ -65,8 +70,8 @@ responses:
     "okf/frameworks/example-chain.md": |
       {"sections": [
         {"heading": "Scope",
-         "body": "This methodology covers the daily example metric snapshot pipeline. [src: raw-doc:raw_files/example/methodology.md]"},
-        {"heading": "Core Formula",
+         "body": "This methodology covers the daily example metric snapshot pipeline. [src: c6]"},
+        {"heading": "## Core Formula",
          "body": "`total_value = quantity * price` [src: raw-doc:raw_files/example/methodology.md]"},
         {"heading": "Known Gaps",
          "body": "The model must not write this section. [src: raw-doc:raw_files/example/methodology.md]"}

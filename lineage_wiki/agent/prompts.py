@@ -79,23 +79,31 @@ _JSON_ONLY = (
 
 
 def planner_prompt(
-    prompts: PromptSet, cfg: ChainConfig, page_rels: list[str], items: list[EvidenceItem]
+    prompts: PromptSet,
+    cfg: ChainConfig,
+    pages: dict[str, list[str]],
+    items: list[EvidenceItem],
 ) -> str:
     schema = {
         "pages": [
             {
                 "rel_path": "<one of the plannable pages>",
-                "sections": ["<## section headings to enrich>"],
+                "sections": ["<a section heading exactly as listed, without '## '>"],
                 "evidence_ids": ["<relevant evidence ids>"],
             }
         ]
     }
+    page_lines: list[str] = []
+    for rel in sorted(pages):
+        page_lines.append(f"- {rel}")
+        page_lines.extend(f"  - {heading}" for heading in pages[rel])
     return (
         f"{prompts.page_planner}\n\n"
         f"Chain: {cfg.chain.id} — {cfg.chain.name}\n"
         f"Description: {cfg.chain.description}\n\n"
-        "Plannable pages (you may only select from this list):\n"
-        + "\n".join(f"- {rel}" for rel in page_rels)
+        "Plannable pages, each with the section headings you may enrich "
+        "(you may only select from this list; copy headings verbatim):\n"
+        + "\n".join(page_lines)
         + "\n\nEvidence catalog:\n\n"
         + _evidence_block(items, with_content=False)
         + f"\n\nJSON schema:\n{json.dumps(schema, indent=2)}\n\n{_JSON_ONLY}"
@@ -123,7 +131,13 @@ def extractor_prompt(prompts: PromptSet, items: list[EvidenceItem]) -> str:
         ],
     }
     return (
-        f"{prompts.extractor}\n\nEvidence items:\n\n"
+        f"{prompts.extractor}\n\n"
+        "`text` must be a clean, self-contained sentence (or a short "
+        "formula in backticks) that can be pasted into documentation "
+        "prose as-is — never a raw table row, pipe-delimited fragment, "
+        "multi-line code, docstring, or table-of-contents entry. Raw "
+        "evidence wording belongs in `quote`, which must be verbatim.\n\n"
+        "Evidence items:\n\n"
         + _evidence_block(items, with_content=True)
         + f"\n\nJSON schema:\n{json.dumps(schema, indent=2)}\n\n{_JSON_ONLY}"
     )
@@ -140,7 +154,7 @@ def writer_prompt(
         "sections": [
             {
                 "heading": "<one of the allowed section headings>",
-                "body": "<Markdown body; cite claims with [src: <evidence-id>]>",
+                "body": "<Markdown body; cite sources with [src: <evidence-id>]>",
             }
         ]
     }
@@ -149,9 +163,21 @@ def writer_prompt(
         "Allowed sections (write only these):\n"
         + "\n".join(f"- {s}" for s in sections)
         + "\n\nEvery statement must be supported by one of the accepted "
-        "claims below, and every section body must cite its evidence ids "
-        "with [src: <evidence-id>] markers. Do not write SQL. If the "
-        "claims do not cover a section, omit that section.\n\n"
+        "claims below, and every section body must cite its sources with "
+        "[src: <id>] markers, where <id> is a value from the supporting "
+        "claim's `evidence_ids` (never the claim's own `id`). For each "
+        "source you cite, the body must include the supporting claim's "
+        "`text` verbatim — copy it exactly; do not paraphrase, reword, or "
+        "break it up with Markdown emphasis, or the section will be "
+        "rejected by the deterministic grounding check. Prefer `text` "
+        "over `quote`: fall back to the `quote` only when the claim has "
+        "no usable `text`. Write readable prose — never paste raw "
+        "evidence formatting into a body: no pipe-delimited table "
+        "fragments, no multi-line code or docstrings, no anchor or "
+        "table-of-contents links copied from evidence (they do not "
+        "resolve on these pages). Do not repeat the same claim in more "
+        "than one section of the page. Do not write SQL. If the claims "
+        "do not cover a section, omit that section.\n\n"
         f"Accepted claims:\n{json.dumps(claims_payload, indent=2)}\n\n"
         f"Current page draft:\n\n{draft}\n\n"
         f"JSON schema:\n{json.dumps(schema, indent=2)}\n\n{_JSON_ONLY}"
@@ -170,7 +196,17 @@ def reviewer_prompt(
         "issues": ["<one line per problem found>"],
     }
     return (
-        f"{prompts.reviewer}\n\nPage: {rel_path}\n\n"
+        f"{prompts.reviewer}\n\n"
+        "Judge ONLY the proposed section bodies against the accepted "
+        "claims: grounding, citation correctness, and internal "
+        "consistency. Do not raise issues about link resolvability, "
+        "index membership, required sections, or anything outside the "
+        "sections shown — deterministic validation covers those "
+        "elsewhere, and you cannot see the rest of the page. Reject a "
+        "section only for a grounding problem (an unsupported statement, "
+        "a wrong or missing citation, or content that contradicts the "
+        "claims), not for style.\n\n"
+        f"Page: {rel_path}\n\n"
         f"Proposed sections:\n{json.dumps(sections_payload, indent=2)}\n\n"
         f"Accepted claims they must be grounded in:\n"
         f"{json.dumps(claims_payload, indent=2)}\n\n"

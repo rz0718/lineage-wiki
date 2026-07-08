@@ -22,6 +22,7 @@ from ..connectors.bigquery_connector import (
 )
 from ..connectors.local_repo_connector import RepoLoadResult
 from ..connectors.slack_connector import SlackLoadResult
+from ..constants import SCAFFOLD_STATUS_MARK
 from ..ingestion.code_indexer import CodeIndex, index_repo
 from ..ingestion.evidence import EvidenceItem
 from ..ingestion.source_loader import EvidenceBundle, load_sources
@@ -359,8 +360,10 @@ def _bullets(items: list[str], empty: str) -> str:
 def _scaffold_note(ctx: _Ctx, page_kind: str) -> str:
     # Deliberately date-free: the frontmatter `timestamp` carries the run
     # date, and a date in the body would defeat no-op detection across days.
+    # SCAFFOLD_STATUS_MARK must lead the note: the section merge keys on it
+    # to tell refreshable scaffold status from verify-bq/human content.
     return (
-        f"Unverified scaffold {page_kind} generated deterministically by "
+        f"{SCAFFOLD_STATUS_MARK} {page_kind} generated deterministically by "
         "`lineage-wiki` from the chain config and locally loaded evidence. "
         "No fact on this page has been cross-checked against that evidence yet."
     )

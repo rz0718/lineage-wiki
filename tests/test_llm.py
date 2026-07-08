@@ -85,6 +85,209 @@ def test_anthropic_provider_requires_env_key(monkeypatch):
         provider.complete(stage="extractor", system="s", prompt="p")
 
 
+def _openai_response(text, finish_reason):
+    return {
+        "model": "m",
+        "choices": [
+            {"message": {"role": "assistant", "content": text}, "finish_reason": finish_reason}
+        ],
+    }
+
+
+def test_openai_provider_continues_truncated_responses(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    provider = build_provider(provider="openai", model="gpt-x")
+    responses = iter(
+        [
+            _openai_response('{"claims": [{"id": "c1", "te', "length"),
+            _openai_response('xt": "done"}]}', "stop"),
+        ]
+    )
+    requests = []
+
+    def fake_post(url, payload, headers):
+        requests.append(payload)
+        return next(responses)
+
+    monkeypatch.setattr("lineage_wiki.providers._post_json", fake_post)
+    response = provider.complete(stage="extractor", system="s", prompt="p")
+    assert response.text == '{"claims": [{"id": "c1", "text": "done"}]}'
+    assert json.loads(response.text) == {"claims": [{"id": "c1", "text": "done"}]}
+    # The second request must carry the partial answer as an assistant prefill.
+    assert requests[1]["messages"][-1] == {
+        "role": "assistant",
+        "content": '{"claims": [{"id": "c1", "te',
+    }
+
+
+def test_openai_prefill_strips_trailing_whitespace(monkeypatch):
+    """Anthropic backends behind OpenAI-compatible endpoints (OpenRouter)
+    reject a prefill ending in whitespace with HTTP 400 — the partial must
+    be rstripped before being sent back."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    provider = build_provider(provider="openai", model="gpt-x")
+    responses = iter(
+        [
+            _openai_response('{"claims": [1, ', "length"),
+            _openai_response("2]}", "stop"),
+        ]
+    )
+    requests = []
+
+    def fake_post(url, payload, headers):
+        requests.append(payload)
+        return next(responses)
+
+    monkeypatch.setattr("lineage_wiki.providers._post_json", fake_post)
+    response = provider.complete(stage="extractor", system="s", prompt="p")
+    assert requests[1]["messages"][-1] == {
+        "role": "assistant",
+        "content": '{"claims": [1,',
+    }
+    assert json.loads(response.text) == {"claims": [1, 2]}
+
+
+def test_openai_prefill_strip_keeps_accumulated_whitespace(monkeypatch):
+    """Stripping the prefill must not mutate the accumulated answer: a
+    response truncated after meaningful whitespace inside a JSON string
+    (here ``"total ``) must keep that space in the returned text."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    provider = build_provider(provider="openai", model="gpt-x")
+    responses = iter(
+        [
+            _openai_response('{"claims": [{"text": "total ', "length"),
+            _openai_response('revenue"}]}', "stop"),
+        ]
+    )
+    requests = []
+
+    def fake_post(url, payload, headers):
+        requests.append(payload)
+        return next(responses)
+
+    monkeypatch.setattr("lineage_wiki.providers._post_json", fake_post)
+    response = provider.complete(stage="extractor", system="s", prompt="p")
+    # The prefill sent upstream is stripped (Anthropic-style backends 400
+    # on trailing whitespace)...
+    assert requests[1]["messages"][-1]["content"] == '{"claims": [{"text": "total'
+    # ...but the returned text keeps the meaningful in-string space.
+    assert json.loads(response.text) == {"claims": [{"text": "total revenue"}]}
+
+
+def test_openai_provider_gives_up_when_truncation_never_ends(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    provider = build_provider(provider="openai", model="gpt-x")
+    monkeypatch.setattr(
+        "lineage_wiki.providers._post_json",
+        lambda url, payload, headers: _openai_response("chunk", "length"),
+    )
+    with pytest.raises(ProviderError, match="still truncated"):
+        provider.complete(stage="extractor", system="s", prompt="p")
+
+
+def test_anthropic_provider_continues_truncated_responses(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    provider = build_provider(provider="anthropic", model="claude-x")
+    responses = iter(
+        [
+            {
+                "model": "m",
+                "content": [{"type": "text", "text": '{"claims": '}],
+                "stop_reason": "max_tokens",
+            },
+            {
+                "model": "m",
+                "content": [{"type": "text", "text": "[]}"}],
+                "stop_reason": "end_turn",
+            },
+        ]
+    )
+    requests = []
+
+    def fake_post(url, payload, headers):
+        requests.append(payload)
+        return next(responses)
+
+    monkeypatch.setattr("lineage_wiki.providers._post_json", fake_post)
+    response = provider.complete(stage="extractor", system="s", prompt="p")
+    assert json.loads(response.text) == {"claims": []}
+    # Anthropic prefill must not end with whitespace, so the partial is
+    # rstripped before being sent back.
+    assert requests[1]["messages"][-1] == {
+        "role": "assistant",
+        "content": '{"claims":',
+    }
+
+
+def test_post_json_surfaces_provider_error_message(monkeypatch):
+    import io
+    import urllib.error
+    import urllib.request
+
+    from lineage_wiki.providers import _post_json
+
+    def raise_400(request, timeout):
+        raise urllib.error.HTTPError(
+            "https://x/api", 400, "Bad Request", hdrs=None,
+            fp=io.BytesIO(b'{"error": {"message": "model xyz not found"}}'),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", raise_400)
+    with pytest.raises(ProviderError, match="HTTP 400 Bad Request — model xyz not found"):
+        _post_json("https://x/api", {}, {})
+
+    # A body that is not JSON stays out of the error surface entirely.
+    def raise_400_html(request, timeout):
+        raise urllib.error.HTTPError(
+            "https://x/api", 400, "Bad Request", hdrs=None,
+            fp=io.BytesIO(b"<html>huge opaque page</html>"),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", raise_400_html)
+    with pytest.raises(ProviderError, match=r"HTTP 400 Bad Request$"):
+        _post_json("https://x/api", {}, {})
+
+
+def test_post_json_retries_once_on_timeout(monkeypatch):
+    import urllib.request
+
+    from lineage_wiki.providers import _post_json
+
+    calls = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"ok": true}'
+
+    def fake_urlopen(request, timeout):
+        calls.append(request)
+        if len(calls) == 1:
+            raise TimeoutError("stalled")
+        return _Resp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert _post_json("https://x/api", {}, {}) == {"ok": True}
+    assert len(calls) == 2
+
+    # A second consecutive timeout fails cleanly.
+    calls.clear()
+
+    def always_timeout(request, timeout):
+        calls.append(request)
+        raise TimeoutError("stalled")
+
+    monkeypatch.setattr(urllib.request, "urlopen", always_timeout)
+    with pytest.raises(ProviderError, match="retried once"):
+        _post_json("https://x/api", {}, {})
+    assert len(calls) == 2
+
+
 def test_build_provider_rejects_unknown():
     with pytest.raises(ProviderError, match="unknown LLM provider"):
         build_provider(provider="bard", model="x")
@@ -380,8 +583,13 @@ def test_generate_use_llm_end_to_end(tmp_path, monkeypatch):
     framework = (root / "okf" / "frameworks" / "example-chain.md").read_text(
         encoding="utf-8"
     )
-    # Accepted, cited sections were written.
-    assert "daily example metric snapshot pipeline. [src: " in framework
+    # Accepted, cited sections were written. The Scope body cited the claim
+    # id (c6); the published page must carry the resolved evidence id.
+    assert (
+        "daily example metric snapshot pipeline. [src: raw-doc:" in framework
+    )
+    assert "[src: c6]" not in framework
+    # The writer echoed '## Core Formula'; the heading was normalized.
     assert "`total_value = quantity * price` [src: " in framework
     # The rejected formula became a Known Gap instead of being published.
     assert "- (llm) A proposed formula (profit = revenue - cost) was rejected" in framework
@@ -405,6 +613,72 @@ def test_generate_use_llm_end_to_end(tmp_path, monkeypatch):
     assert len(transcript["claims_accepted"]) == 3
     assert any("SQL is not allowed" in r for r in transcript["rejected"])
     assert any("not in the allowed list" in r for r in transcript["rejected"])
+    # The planner's raw output and its filtered-out entries are diagnosable.
+    assert len(transcript["planner_pages"]) == 3
+    assert any(
+        "planner: page 'okf/invented/not-in-plan.md' is not in the "
+        "deterministic plan" in r
+        for r in transcript["rejected"]
+    )
+    assert any(
+        "section 'Known Gaps' does not match an enrichable heading" in r
+        for r in transcript["rejected"]
+    )
+
+
+def test_claim_id_citations_resolve_to_evidence_ids():
+    """[src: <claim-id>] markers are rewritten to the claim's verified
+    evidence ids; unknown ids are left for the grounding check to reject."""
+    from lineage_wiki.agent.llm_pipeline import _resolve_claim_citations
+
+    claims = [
+        Claim(
+            id="c1",
+            kind="fact",
+            text="A fact.",
+            evidence_ids=[RAW_DOC_ID, SCHEMA_ID],
+        )
+    ]
+    known = {RAW_DOC_ID, SCHEMA_ID}
+    resolved = _resolve_claim_citations("A fact. [src: c1]", claims, known)
+    assert resolved == f"A fact. [src: {RAW_DOC_ID}] [src: {SCHEMA_ID}]"
+    # Real evidence ids and unknown ids pass through untouched.
+    untouched = f"A fact. [src: {RAW_DOC_ID}] [src: c99]"
+    assert _resolve_claim_citations(untouched, claims, known) == untouched
+
+
+def test_warning_when_accepted_claims_are_never_published(tmp_path, monkeypatch):
+    """Accepted claims that never reach a page must be called out in the
+    run summary, not silently discarded (the planner-returns-nothing
+    failure mode)."""
+    root = _setup_target(tmp_path, monkeypatch)
+    fixtures = yaml.safe_load(LLM_FIXTURES.read_text(encoding="utf-8"))
+    fixtures["responses"]["page_planner"] = json.dumps(
+        {
+            "pages": [
+                {
+                    "rel_path": "okf/frameworks/example-chain.md",
+                    "sections": ["Nonexistent Heading"],
+                }
+            ]
+        }
+    )
+    override = tmp_path / "planner_empty.yml"
+    override.write_text(yaml.safe_dump(fixtures), encoding="utf-8")
+    monkeypatch.setenv("LINEAGE_WIKI_LLM_FIXTURES", str(override))
+
+    result = runner.invoke(
+        app,
+        ["generate", "--config", str(EXAMPLE_CONFIG), "--root", str(root), "--use-llm"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "pages enriched: 0" in result.output
+    assert (
+        "warning: 3 accepted claim(s) were not published — the planner "
+        "selected no enrichable sections" in result.output
+    )
+    # The reason the planner's selection was dropped is shown inline.
+    assert "'Nonexistent Heading' does not match an enrichable heading" in result.output
 
 
 def test_generate_use_llm_resolves_known_gaps(tmp_path, monkeypatch):
@@ -459,8 +733,9 @@ def test_llm_sections_survive_deterministic_rerun(tmp_path, monkeypatch):
 
 def test_llm_planner_selects_component_pages_but_cannot_invent(tmp_path):
     """Configured component pages are eligible planner targets; pages
-    outside the deterministic plan are silently dropped."""
-    from lineage_wiki.agent.llm_pipeline import _run_planner
+    outside the deterministic plan are dropped with a recorded reason, and
+    headings echoed with the Markdown '## ' marker still match."""
+    from lineage_wiki.agent.llm_pipeline import EnrichmentResult, _run_planner
     from lineage_wiki.agent.prompts import load_prompts
     from lineage_wiki.okf.templates import plan_chain_pages
 
@@ -478,7 +753,7 @@ def test_llm_planner_selects_component_pages_but_cannot_invent(tmp_path):
                     "pages": [
                         {
                             "rel_path": component_rel,
-                            "sections": ["What It Represents", "Formula / Logic"],
+                            "sections": ["## What It Represents", "Formula / Logic"],
                         },
                         {
                             "rel_path": "okf/components/invented-component.md",
@@ -489,9 +764,18 @@ def test_llm_planner_selects_component_pages_but_cannot_invent(tmp_path):
             )
         }
     )
-    jobs = _run_planner(provider, load_prompts(tmp_path), cfg, plan, 0.0)
+    result = EnrichmentResult()
+    jobs = _run_planner(provider, load_prompts(tmp_path), cfg, plan, result, 0.0)
     assert [j.rel_path for j in jobs] == [component_rel]
+    # '## ' prefix normalized away, not silently dropped.
     assert jobs[0].sections == ["What It Represents", "Formula / Logic"]
+    assert any(
+        "planner: page 'okf/components/invented-component.md' is not in the "
+        "deterministic plan" in r
+        for r in result.rejected
+    )
+    # The raw planner output is preserved for the transcript.
+    assert len(result.planner_pages) == 2
 
 
 def test_dry_run_with_llm_writes_nothing(tmp_path, monkeypatch):

@@ -17,7 +17,7 @@ from __future__ import annotations
 import difflib
 import re
 
-from ..constants import PRESERVED_SECTIONS
+from ..constants import PRESERVED_SECTIONS, SCAFFOLD_STATUS_MARK
 from .templates import RAW_DOC_EXTRACTION_GAP, bq_cross_check_table
 
 _SECTION_HEAD = re.compile(r"(?m)^## (.+?)\s*$")
@@ -150,6 +150,23 @@ def _reconcile_gap_bullets(
     return f"{heading_line}\n\n{body}\n"
 
 
+def _is_scaffold_status(block: str) -> bool:
+    """True when a ``Verification Status`` block is still the untouched
+    scaffold: nothing but the generated evidence table and the single note
+    line led by ``SCAFFOLD_STATUS_MARK``. Any other non-empty line means
+    verify-bq results or a human note landed here and must be preserved."""
+    saw_mark = False
+    for line in block.splitlines()[1:]:  # skip the heading line
+        stripped = line.strip()
+        if not stripped or stripped.startswith("|"):
+            continue
+        if not saw_mark and stripped.startswith(SCAFFOLD_STATUS_MARK):
+            saw_mark = True
+            continue
+        return False
+    return saw_mark
+
+
 def _invalidation_note(stale_ids: list[str]) -> str:
     cited = ", ".join(f"`{e}`" for e in stale_ids)
     return (
@@ -171,7 +188,11 @@ def merge_manual_sections(
 
     - a section named in ``force`` always takes the draft body (the current
       run intentionally rewrote it, e.g. the LLM pipeline);
-    - a section named in ``preserved`` keeps its existing body;
+    - a section named in ``preserved`` keeps its existing body — except a
+      ``Verification Status`` body that is still the untouched scaffold
+      (only the generated table and the ``SCAFFOLD_STATUS_MARK`` note line,
+      so no verify-bq results or human notes), which refreshes from the
+      draft so evidence status cannot go stale;
     - a section whose existing body carries ``[src: …]`` citations is
       evidence-written (LLM run) and survives a scaffold rewrite — *unless*
       one of its cited ids is in ``stale_evidence`` (that evidence changed
@@ -199,7 +220,10 @@ def merge_manual_sections(
         if heading in force or old is None:
             body = block
         elif heading in preserved:
-            body = old
+            if heading == "Verification Status" and _is_scaffold_status(old):
+                body = block
+            else:
+                body = old
         elif heading == "Known Gaps":
             body = _merge_gap_block(old, block)
         elif CITATION_MARK in old and CITATION_MARK not in block:

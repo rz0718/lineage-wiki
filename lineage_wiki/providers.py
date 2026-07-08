@@ -30,6 +30,12 @@ FIXTURES_ENV = "LINEAGE_WIKI_LLM_FIXTURES"
 # Pipeline stage names — fixture files key their responses by these.
 STAGES = ("page_planner", "extractor", "writer", "reviewer")
 
+# How many follow-up "continue" requests a provider may issue when a
+# completion is cut off by an output-token cap. Endpoints (OpenRouter in
+# particular) can clamp max_tokens well below what we request, so a long
+# JSON answer may need several rounds to finish.
+MAX_CONTINUATIONS = 8
+
 
 class ProviderError(Exception):
     """Raised when a provider cannot be resolved or a completion fails."""
@@ -54,7 +60,7 @@ class LLMProvider:
         system: str,
         prompt: str,
         temperature: float = 0.0,
-        max_tokens: int = 4096,
+        max_tokens: int = 32000,
     ) -> LLMResponse:
         raise NotImplementedError
 
@@ -69,20 +75,66 @@ def _api_key(env_name: str, provider: str) -> str:
     return key
 
 
+def _error_detail(exc: urllib.error.HTTPError) -> str:
+    """Extract the provider's error message from an HTTP error response.
+
+    Providers return JSON like ``{"error": {"message": "..."}}``; only that
+    message field is surfaced (truncated), never the raw body.
+    """
+    try:
+        data = json.loads(exc.read().decode("utf-8", errors="replace"))
+    except Exception:
+        return ""
+    error = data.get("error") if isinstance(data, dict) else None
+    if isinstance(error, dict):
+        message = str(error.get("message", ""))
+    elif isinstance(error, str):
+        message = error
+    else:
+        message = ""
+    message = message.strip()
+    if not message:
+        return ""
+    return f" — {message[:300]}"
+
+
 def _post_json(url: str, payload: dict, headers: dict[str, str]) -> dict:
     body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json", **headers}
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        # exc.read() may echo request details; keep the error surface small
-        # and never include headers (they carry the API key).
-        raise ProviderError(f"{url}: HTTP {exc.code} {exc.reason}") from None
-    except urllib.error.URLError as exc:
-        raise ProviderError(f"{url}: {exc.reason}") from None
+    # One retry on timeout only: a stalled completion is the common transient
+    # failure, and losing a whole multi-stage pipeline run to a single slow
+    # request is far more expensive than one duplicate attempt.
+    for attempt in (1, 2):
+        request = urllib.request.Request(
+            url, data=body, headers={"Content-Type": "application/json", **headers}
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=600) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            # Never echo the raw body or headers (they can carry request
+            # details / the API key); surface only the provider's structured
+            # error message, which is what a 4xx needs to be actionable.
+            raise ProviderError(
+                f"{url}: HTTP {exc.code} {exc.reason}{_error_detail(exc)}"
+            ) from None
+        except urllib.error.URLError as exc:
+            # A connect-phase timeout arrives as URLError wrapping a
+            # TimeoutError; treat it like the read-phase one below.
+            if isinstance(exc.reason, TimeoutError) and attempt == 1:
+                continue
+            raise ProviderError(f"{url}: {exc.reason}") from None
+        except TimeoutError as exc:
+            # A timeout while reading the response body (after headers arrive)
+            # surfaces as a bare TimeoutError, not URLError — catch it
+            # explicitly so large/slow completions fail cleanly instead of
+            # crashing with a raw traceback.
+            if attempt == 1:
+                continue
+            raise ProviderError(
+                f"{url}: request timed out waiting for a response "
+                "(retried once)"
+            ) from exc
+    raise AssertionError("unreachable")
 
 
 @dataclass
@@ -95,26 +147,74 @@ class OpenAIProvider(LLMProvider):
     api_key_env: str = "OPENAI_API_KEY"
     name = "openai"
 
-    def complete(self, *, stage, system, prompt, temperature=0.0, max_tokens=4096):
+    def complete(self, *, stage, system, prompt, temperature=0.0, max_tokens=32000):
         key = _api_key(self.api_key_env, self.name)
-        data = _post_json(
-            f"{self.base_url.rstrip('/')}/chat/completions",
-            {
-                "model": self.model,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": prompt},
-                ],
-            },
-            {"Authorization": f"Bearer {key}"},
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ]
+        accumulated = ""
+        model_seen = self.model
+        for _ in range(1 + MAX_CONTINUATIONS):
+            # On continuation rounds the partial answer is sent back as a
+            # trailing assistant message; OpenRouter (and Anthropic-style
+            # backends) treat that as a prefill and resume mid-token-stream.
+            # Anthropic backends reject prefill with trailing whitespace
+            # (HTTP 400), so send a stripped copy — but keep ``accumulated``
+            # itself intact, since trailing whitespace can be meaningful
+            # (e.g. inside a truncated JSON string value).
+            prefill = accumulated.rstrip()
+            request_messages = messages + (
+                [{"role": "assistant", "content": prefill}] if prefill else []
+            )
+            data = _post_json(
+                f"{self.base_url.rstrip('/')}/chat/completions",
+                {
+                    "model": self.model,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "messages": request_messages,
+                },
+                {"Authorization": f"Bearer {key}"},
+            )
+            try:
+                choice = data["choices"][0]
+                message = choice["message"]
+                text = message["content"]
+            except (KeyError, IndexError, TypeError):
+                raise ProviderError("openai response had no choices[0].message.content")
+            model_seen = str(data.get("model", self.model))
+            if not text and not accumulated:
+                finish_reason = choice.get("finish_reason", "unknown")
+                extra_keys = [k for k in message if k not in ("role", "content")]
+                reasoning_len = 0
+                for field_name in ("reasoning", "reasoning_content"):
+                    value = message.get(field_name)
+                    if isinstance(value, str):
+                        reasoning_len += len(value)
+                raise ProviderError(
+                    f"{self.model}: message.content was empty (finish_reason="
+                    f"{finish_reason!r}"
+                    + (f", reasoning field length={reasoning_len}" if reasoning_len else "")
+                    + (f", other message keys={extra_keys}" if extra_keys else "")
+                    + "). If finish_reason is 'length', the model likely spent "
+                    "max_tokens on reasoning before producing an answer — try a "
+                    "non-reasoning model or a much larger max_tokens."
+                )
+            if not text:
+                # A continuation round that adds nothing will never finish.
+                raise ProviderError(
+                    f"{self.model}: continuation after a truncated response "
+                    "returned no content"
+                )
+            accumulated += text
+            if choice.get("finish_reason") != "length":
+                return LLMResponse(text=accumulated, model=model_seen)
+        raise ProviderError(
+            f"{self.model}: response still truncated (finish_reason='length') "
+            f"after {MAX_CONTINUATIONS} continuation request(s) — the endpoint "
+            "is capping output tokens well below the requested max_tokens"
         )
-        try:
-            text = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError):
-            raise ProviderError("openai response had no choices[0].message.content")
-        return LLMResponse(text=text or "", model=str(data.get("model", self.model)))
 
 
 @dataclass
@@ -126,24 +226,48 @@ class AnthropicProvider(LLMProvider):
     api_key_env: str = "ANTHROPIC_API_KEY"
     name = "anthropic"
 
-    def complete(self, *, stage, system, prompt, temperature=0.0, max_tokens=4096):
+    def complete(self, *, stage, system, prompt, temperature=0.0, max_tokens=32000):
         key = _api_key(self.api_key_env, self.name)
-        data = _post_json(
-            f"{self.base_url.rstrip('/')}/v1/messages",
-            {
-                "model": self.model,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "system": system,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            {"x-api-key": key, "anthropic-version": "2023-06-01"},
+        accumulated = ""
+        model_seen = self.model
+        for _ in range(1 + MAX_CONTINUATIONS):
+            messages = [{"role": "user", "content": prompt}]
+            prefill = accumulated.rstrip()
+            if prefill:
+                # Assistant prefill makes the model resume the cut-off
+                # answer. The API rejects prefill with trailing whitespace,
+                # so send a stripped copy — but keep ``accumulated`` itself
+                # intact, since trailing whitespace can be meaningful (e.g.
+                # inside a truncated JSON string value).
+                messages.append({"role": "assistant", "content": prefill})
+            data = _post_json(
+                f"{self.base_url.rstrip('/')}/v1/messages",
+                {
+                    "model": self.model,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "system": system,
+                    "messages": messages,
+                },
+                {"x-api-key": key, "anthropic-version": "2023-06-01"},
+            )
+            blocks = data.get("content") or []
+            text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict))
+            if not text and not accumulated:
+                raise ProviderError("anthropic response had no text content blocks")
+            if not text:
+                raise ProviderError(
+                    f"{self.model}: continuation after a truncated response "
+                    "returned no content"
+                )
+            accumulated += text
+            model_seen = str(data.get("model", self.model))
+            if data.get("stop_reason") != "max_tokens":
+                return LLMResponse(text=accumulated, model=model_seen)
+        raise ProviderError(
+            f"{self.model}: response still truncated (stop_reason="
+            f"'max_tokens') after {MAX_CONTINUATIONS} continuation request(s)"
         )
-        blocks = data.get("content") or []
-        text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict))
-        if not text:
-            raise ProviderError("anthropic response had no text content blocks")
-        return LLMResponse(text=text, model=str(data.get("model", self.model)))
 
 
 @dataclass
@@ -175,7 +299,7 @@ class MockProvider(LLMProvider):
         responses = data.get("responses", data)
         return cls(responses=dict(responses), origin=str(path))
 
-    def complete(self, *, stage, system, prompt, temperature=0.0, max_tokens=4096):
+    def complete(self, *, stage, system, prompt, temperature=0.0, max_tokens=32000):
         entry = self.responses.get(stage)
         if entry is None:
             raise ProviderError(

@@ -179,6 +179,32 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
     return True
 
 
+def _normalize_output_dir(root: Path, output_dir: str) -> str:
+    """Return a canonical root-relative OKF output directory.
+
+    Configs should use a root-relative path such as ``okf``. For operator
+    convenience, also accept paths that redundantly include the selected root
+    (for example ``../wiki-repo/okf`` when ``--root ../wiki-repo``), as long as
+    the resolved destination is still inside the target root.
+    """
+    value = output_dir.strip()
+    if not value:
+        raise GenerateError(
+            f"unsafe output_dir {output_dir!r}: use a relative path inside the target root"
+        )
+    raw = Path(value)
+    target = raw if raw.is_absolute() else root / raw
+    try:
+        # Collapse "." and ".." without following symlinks. The follow-up
+        # safety check must still see symlink components such as "okf".
+        rel = Path(os.path.abspath(target)).relative_to(root)
+    except ValueError as exc:
+        raise GenerateError(
+            f"unsafe output_dir {output_dir!r}: use a relative path inside the target root"
+        ) from exc
+    return rel.as_posix()
+
+
 def _reject_unsafe_output_dir(root: Path, output_dir: str) -> None:
     """Fail before planning writes when the OKF output directory is unsafe."""
     rel = Path(output_dir)
@@ -206,6 +232,20 @@ def _reject_unsafe_output_dir(root: Path, output_dir: str) -> None:
             raise GenerateError(
                 f"unsafe output_dir {output_dir!r}: resolved path escapes the target root"
             )
+
+
+def with_safe_output_dir(cfg: ChainConfig, root: Path) -> ChainConfig:
+    """Return ``cfg`` with ``generation.output_dir`` normalized to the
+    canonical root-relative form (and validated). Every command that maps
+    ``output_dir`` to on-disk or manifest paths must apply this, so that
+    e.g. ``../wiki-repo/okf`` and ``okf`` name the same owned files."""
+    output_dir = _normalize_output_dir(root, cfg.generation.output_dir)
+    _reject_unsafe_output_dir(root, output_dir)
+    if output_dir == cfg.generation.output_dir:
+        return cfg
+    normalized = cfg.model_copy(deep=True)
+    normalized.generation.output_dir = output_dir
+    return normalized
 
 
 def _safe_target(root: Path, rel: str) -> Path:
@@ -731,7 +771,7 @@ def run_generate(
     validation status are exactly what a real run would produce.
     """
     root = Path(root).resolve()
-    _reject_unsafe_output_dir(root, cfg.generation.output_dir)
+    cfg = with_safe_output_dir(cfg, root)
     now = now or now_stamp()
 
     plan = plan_chain_pages(cfg, root, now)
@@ -934,7 +974,7 @@ def run_update(
     validation risks instead.
     """
     root = Path(root).resolve()
-    _reject_unsafe_output_dir(root, cfg.generation.output_dir)
+    cfg = with_safe_output_dir(cfg, root)
     now = now or now_stamp()
 
     previous_manifest = load_manifest(root)

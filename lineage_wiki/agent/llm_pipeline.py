@@ -31,7 +31,7 @@ from ..okf.sections import (
 )
 from ..okf.templates import RAW_DOC_EXTRACTION_GAP, ChainPlan, bq_cross_check_gap
 from ..providers import LLMProvider
-from .grounding import Claim, Conflict, GroundingContext
+from .grounding import _SRC_MARKER, Claim, Conflict, GroundingContext
 from .prompts import (
     PromptSet,
     extractor_prompt,
@@ -52,14 +52,59 @@ _FORBIDDEN_SECTIONS = set(PRESERVED_SECTIONS) | {"Known Gaps"}
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$")
 
+# Models routinely echo section names with the Markdown marker ("## Scope")
+# even when told not to; match on the heading text, not the decoration.
+_HEADING_MARKER = re.compile(r"^\s*#+\s*")
+
+
+def _normalized_heading(name: str) -> str:
+    return _HEADING_MARKER.sub("", name).strip()
+
+
+def _resolve_claim_citations(
+    body: str, claims: list[Claim], known_ids: set[str]
+) -> str:
+    """Rewrite ``[src: <claim-id>]`` markers to the claim's evidence ids.
+
+    Models regularly cite the claim's own ``id`` instead of its
+    ``evidence_ids``. The mapping is deterministic and the claim's evidence
+    was already verified, so expand it rather than reject the section.
+    Anything that is neither a known evidence id nor an accepted claim id
+    is left in place for the grounding check to reject.
+    """
+    by_id = {c.id: c for c in claims}
+
+    def _expand(match: re.Match) -> str:
+        cited = match.group(1)
+        if cited in known_ids:
+            return match.group(0)
+        claim = by_id.get(cited)
+        if claim is None:
+            return match.group(0)
+        return " ".join(
+            f"[src: {e}]" for e in dict.fromkeys(claim.evidence_ids)
+        )
+
+    return _SRC_MARKER.sub(_expand, body)
+
 
 def _parse_json(stage: str, text: str) -> dict:
     cleaned = _FENCE.sub("", text.strip())
+    if not cleaned:
+        raise LLMPipelineError(
+            f"{stage} stage returned an empty response (raw response was "
+            f"{len(text)} char(s) before fence-stripping) — the model may "
+            "have spent its entire max_tokens budget on reasoning/thinking "
+            "output with nothing left for the answer, been filtered, or "
+            "the configured model id may not exist on the provider"
+        )
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError as exc:
+        preview = cleaned[:200] + ("…" if len(cleaned) > 200 else "")
         raise LLMPipelineError(
-            f"{stage} stage did not return valid JSON: {exc}"
+            f"{stage} stage did not return valid JSON: {exc}\n"
+            f"response was {len(cleaned)} char(s); starts with: {preview!r}"
         ) from None
     if not isinstance(data, dict):
         raise LLMPipelineError(f"{stage} stage must return a JSON object")
@@ -110,6 +155,9 @@ class EnrichmentResult:
     # keyed by "<rel_path>::<heading>" — used to gate gap resolution on
     # published citations, not merely on accepted-but-unwritten claims.
     section_evidence_ids: dict[str, list[str]] = field(default_factory=dict)
+    # the planner's raw page entries, before filtering — kept in the
+    # transcript so an empty job list is diagnosable.
+    planner_pages: list = field(default_factory=list)
     rejected: list[str] = field(default_factory=list)  # human-readable reasons
     reviewer_issues: list[str] = field(default_factory=list)
     summary: list[str] = field(default_factory=list)
@@ -130,29 +178,48 @@ def _run_planner(
     prompts: PromptSet,
     cfg: ChainConfig,
     plan: ChainPlan,
+    result: EnrichmentResult,
     temperature: float,
 ) -> list[PageJob]:
     drafts = {d.rel_path: d.content for d in plan.pages}
+    available_by_rel = {
+        rel: sorted(_headings(content) - _FORBIDDEN_SECTIONS)
+        for rel, content in drafts.items()
+    }
     items = plan.bundle.all_items()
     raw = _complete(
         provider,
         prompts,
         "page_planner",
-        planner_prompt(prompts, cfg, sorted(drafts), items),
+        planner_prompt(prompts, cfg, available_by_rel, items),
         temperature,
     )
     data = _parse_json("page_planner", raw)
+    entries = data.get("pages", [])
+    result.planner_pages = entries if isinstance(entries, list) else []
     jobs: list[PageJob] = []
-    for entry in data.get("pages", []):
+    for entry in result.planner_pages:
         if not isinstance(entry, dict):
             continue
-        rel = str(entry.get("rel_path", ""))
+        rel = str(entry.get("rel_path", "")).strip()
         if rel not in drafts:
-            continue  # the model may not invent pages
-        available = _headings(drafts[rel]) - _FORBIDDEN_SECTIONS
-        sections = [
-            str(s) for s in entry.get("sections", []) if str(s) in available
-        ]
+            # the model may not invent pages
+            result.rejected.append(
+                f"planner: page {rel!r} is not in the deterministic plan"
+            )
+            continue
+        available = set(available_by_rel[rel])
+        sections: list[str] = []
+        for raw_name in entry.get("sections", []):
+            heading = _normalized_heading(str(raw_name))
+            if heading in available:
+                if heading not in sections:
+                    sections.append(heading)
+            else:
+                result.rejected.append(
+                    f"planner: {rel}: section {str(raw_name)!r} does not "
+                    "match an enrichable heading"
+                )
         if sections:
             jobs.append(PageJob(rel_path=rel, sections=sections))
     return jobs
@@ -242,8 +309,10 @@ def _run_writer_and_reviewer(
     for entry in data.get("sections", []):
         if not isinstance(entry, dict):
             continue
-        heading = str(entry.get("heading", ""))
-        body = str(entry.get("body", ""))
+        heading = _normalized_heading(str(entry.get("heading", "")))
+        body = _resolve_claim_citations(
+            str(entry.get("body", "")), claims, ctx.known_ids
+        )
         if heading not in job.sections:
             result.rejected.append(
                 f"{job.rel_path}: section {heading!r} was not in the allowed list"
@@ -297,7 +366,7 @@ def run_llm_enrichment(
     ctx = GroundingContext(plan.bundle)
     result = EnrichmentResult()
 
-    jobs = _run_planner(provider, prompts, cfg, plan, temperature)
+    jobs = _run_planner(provider, prompts, cfg, plan, result, temperature)
     claims = _run_extractor(provider, prompts, plan, ctx, result, temperature)
 
     drafts = {d.rel_path: d.content for d in plan.pages}
@@ -383,9 +452,24 @@ def run_llm_enrichment(
         result.summary.append(
             f"reviewer issues: {len(result.reviewer_issues)}"
         )
+    if n_accepted and not result.sections_written:
+        cause = (
+            "the planner selected no enrichable sections"
+            if not jobs
+            else "every proposed section was rejected"
+        )
+        result.summary.append(
+            f"warning: {n_accepted} accepted claim(s) were not published — "
+            f"{cause}"
+        )
+        # Claim-level rejections are already counted above; surface the
+        # planner/writer/reviewer-level drops that explain the empty output.
+        for reason in [r for r in result.rejected if not r.startswith("claim ")][:5]:
+            result.summary.append(f"  {reason}")
 
     result.transcript = {
         "provider": provider.name,
+        "planner_pages": list(result.planner_pages),
         "jobs": [{"rel_path": j.rel_path, "sections": j.sections} for j in jobs],
         "claims_accepted": [c.payload() for c in claims],
         "rejected": list(result.rejected),

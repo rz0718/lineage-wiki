@@ -237,6 +237,51 @@ def test_merge_manual_sections_semantics():
     assert merged.rstrip().endswith("Manual content.")  # manual section retained
 
 
+def test_scaffold_verification_status_refreshes():
+    """A Verification Status that is still pure scaffold text must track the
+    current run's evidence state — only verify-bq results and human notes
+    earn preservation. This is the stale 'BigQuery schemas: Not loaded'
+    regression: the schema was ingested but the page kept claiming it
+    wasn't."""
+    existing = (
+        "---\ntype: Framework\n---\n# Page\n\n"
+        "## Verification Status\n\n"
+        "| BigQuery schemas | Not loaded — BigQuery unavailable |\n\n"
+        "Unverified scaffold framework page generated deterministically.\n"
+    )
+    draft = (
+        "---\ntype: Framework\n---\n# Page\n\n"
+        "## Verification Status\n\n"
+        "| BigQuery schemas | Ingested — 1 schema(s) |\n\n"
+        "Unverified scaffold framework page generated deterministically.\n"
+    )
+    merged = merge_manual_sections(existing, draft)
+    assert "Ingested — 1 schema(s)" in merged
+    assert "Not loaded — BigQuery unavailable" not in merged
+
+    # A human note appended after the scaffold sentence earns preservation
+    # even though the scaffold mark is still present.
+    annotated = existing.replace(
+        "generated deterministically.\n",
+        "generated deterministically.\n\nNote from the data team: numbers "
+        "were eyeballed against the Q2 close.\n",
+    )
+    merged = merge_manual_sections(annotated, draft)
+    assert "Note from the data team" in merged
+    assert "Not loaded — BigQuery unavailable" in merged
+    assert "Ingested — 1 schema(s)" not in merged
+
+    # Once verify-bq has written results (no scaffold mark), they survive.
+    verified = existing.replace(
+        "| BigQuery schemas | Not loaded — BigQuery unavailable |\n\n"
+        "Unverified scaffold framework page generated deterministically.\n",
+        "Verified from BigQuery schema metadata and safe aggregate profiling.\n",
+    )
+    merged = merge_manual_sections(verified, draft)
+    assert "Verified from BigQuery schema metadata" in merged
+    assert "Ingested — 1 schema(s)" not in merged
+
+
 def test_diff_summary_reports_lines_and_sections():
     old = "# T\n\n## A\n\none\n\n## B\n\ntwo\n"
     new = "# T\n\n## A\n\none\nplus\n\n## B\n\nchanged\n"
