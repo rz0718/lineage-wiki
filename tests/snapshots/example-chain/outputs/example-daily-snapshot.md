@@ -32,6 +32,10 @@ Not yet documented — the table grain will be recorded once BigQuery schema evi
 
 Not yet documented — no schema evidence has been ingested for this table.
 
+## Column Meanings
+
+Not yet documented — business meaning beyond the BigQuery column descriptions is added by grounded LLM enrichment (`lineage-wiki generate --use-llm`) with `[src:]` citations. The Column Definitions section above stays strictly BigQuery schema metadata.
+
 ## Key Formula Mapping
 
 No formula mappings exist yet. Calculated columns will be linked to

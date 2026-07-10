@@ -143,6 +143,24 @@ def bq_cross_check_table(bullet_text: str) -> str | None:
     return match.group(1) if match else None
 
 
+_REPO_CROSS_CHECK_RE = re.compile(
+    r"^Code loaded from repo `([^`]+)` has not been cross-checked"
+)
+
+
+def repo_cross_check_gap(repo_name: str) -> str:
+    return (
+        f"Code loaded from repo `{repo_name}` has not been cross-checked "
+        "against the methodology (cross-checking lands in a later milestone)."
+    )
+
+
+def repo_cross_check_repo(bullet_text: str) -> str | None:
+    """The repo name if ``bullet_text`` is a ``repo_cross_check_gap`` bullet."""
+    match = _REPO_CROSS_CHECK_RE.match(bullet_text)
+    return match.group(1) if match else None
+
+
 def _norm_table(table: str, default_project: str | None) -> str:
     """Canonical table identity for ref matching: the fully-qualified
     ``project.dataset.table``, with the same backtick/whitespace/default-
@@ -273,10 +291,7 @@ def _build_ctx(cfg: ChainConfig, root: Path, now: str) -> _Ctx:
                 f"Configured symbol `{symbol}` was not found in the loaded "
                 f"files of repo `{repo.name}`."
             )
-        gaps.append(
-            f"Code loaded from repo `{repo.name}` has not been cross-checked "
-            "against the methodology (cross-checking lands in a later milestone)."
-        )
+        gaps.append(repo_cross_check_gap(repo.name))
     if ctx.outputs and ctx.bq_load is not None and not ctx.bq_load.available:
         gaps.append(
             f"BigQuery is unavailable ({ctx.bq_load.unavailable_reason}); "
@@ -784,12 +799,23 @@ def render_output_page(ctx: _Ctx, table: str, rel: str, title: str) -> str:
             + col_rows
             + "\n\nColumns, types, and descriptions come from the loaded "
             "BigQuery schema. Business meaning beyond the column descriptions "
-            "has not been verified."
+            "lives in [Column Meanings](#column-meanings)."
         )
     elif schema is not None:
         columns = "The loaded BigQuery schema reports no columns for this table."
     else:
         columns = "Not yet documented — no schema evidence has been ingested for this table."
+
+    # LLM-enrichable companion to the deterministic schema table: business
+    # meaning goes here (with citations); Column Definitions stays strictly
+    # BigQuery metadata and is never LLM-enriched.
+    meanings = (
+        "Not yet documented — business meaning beyond the BigQuery column "
+        "descriptions is added by grounded LLM enrichment "
+        "(`lineage-wiki generate --use-llm`) with `[src:]` citations. The "
+        "Column Definitions section above stays strictly BigQuery schema "
+        "metadata."
+    )
 
     if schema is not None:
         verification = (
@@ -820,6 +846,10 @@ def render_output_page(ctx: _Ctx, table: str, rel: str, title: str) -> str:
 ## Column Definitions
 
 {columns}
+
+## Column Meanings
+
+{meanings}
 
 ## Key Formula Mapping
 

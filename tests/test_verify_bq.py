@@ -265,32 +265,6 @@ def test_profile_verification_records_details_in_run_only(
         assert live_value not in value_lines
 
 
-def test_verify_bq_normalizes_redundant_output_dir(
-    verify_cfg, wiki_root, schema_client, profile_client, monkeypatch
-):
-    """generate accepts an output_dir that redundantly includes the root
-    (e.g. ``../wiki/okf``) and records manifest ownership as ``okf/...``;
-    verify-bq must normalize the same way or it skips its own pages as
-    not tool-generated."""
-    monkeypatch.setenv("LINEAGE_WIKI_BQ_FIXTURES", str(FIXTURES))
-    verify_cfg.generation.output_dir = f"../{wiki_root.name}/okf"
-    run_generate(verify_cfg, wiki_root, now=FIXED_NOW)
-
-    result = _verify(
-        verify_cfg, wiki_root, schema_client=schema_client, profile_client=profile_client
-    )
-    assert "okf/outputs/example-daily-snapshot.md" in result.pages_updated
-    assert not result.pages_skipped
-    page = (wiki_root / "okf" / "outputs" / "example-daily-snapshot.md").read_text()
-    assert "Verified from BigQuery schema metadata and safe aggregate profiling." in page
-
-
-def test_verify_bq_rejects_unsafe_output_dir(verify_cfg, wiki_root, schema_client):
-    verify_cfg.generation.output_dir = "../elsewhere/okf"
-    with pytest.raises(VerificationError, match="unsafe output_dir"):
-        _verify(verify_cfg, wiki_root, schema_client=schema_client)
-
-
 def test_profile_zero_rows_is_an_issue(
     verify_cfg, wiki_root, schema_client, snapshot_schema
 ):

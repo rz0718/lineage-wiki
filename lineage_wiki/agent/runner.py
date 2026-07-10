@@ -23,13 +23,19 @@ from ..constants import (
     OKF_SUBDIRS,
     PRESERVED_SECTIONS,
     PROMPT_STUBS,
+    enrichment_denied_sections,
 )
 from ..examples import EXAMPLE_CHAIN_YAML
 from ..ingestion.fingerprints import compute_fingerprint_result, compute_fingerprints
 from ..ingestion.git_context import GitContext, collect_git_context
 from ..ingestion.source_loader import EvidenceBundle
 from ..okf.indexes import build_all_indexes
-from ..okf.sections import diff_summary, merge_manual_sections
+from ..okf.sections import (
+    CITATION_MARK,
+    diff_summary,
+    merge_manual_sections,
+    split_sections,
+)
 from ..okf.templates import ChainPlan, plan_chain_pages
 from ..okf.validator import ValidationReport, validate_tree
 from ..storage.manifest import (
@@ -166,6 +172,7 @@ class WriteOutcome:
     # rel -> [(section heading, stale evidence ids)] for LLM-written sections
     # reverted because their cited evidence changed this run.
     invalidated: dict[str, list[tuple[str, list[str]]]] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
 
     def content_changed(self) -> bool:
         return bool(self.created or self.updated or self.indexes_written)
@@ -234,11 +241,7 @@ def _reject_unsafe_output_dir(root: Path, output_dir: str) -> None:
             )
 
 
-def with_safe_output_dir(cfg: ChainConfig, root: Path) -> ChainConfig:
-    """Return ``cfg`` with ``generation.output_dir`` normalized to the
-    canonical root-relative form (and validated). Every command that maps
-    ``output_dir`` to on-disk or manifest paths must apply this, so that
-    e.g. ``../wiki-repo/okf`` and ``okf`` name the same owned files."""
+def _with_safe_output_dir(cfg: ChainConfig, root: Path) -> ChainConfig:
     output_dir = _normalize_output_dir(root, cfg.generation.output_dir)
     _reject_unsafe_output_dir(root, output_dir)
     if output_dir == cfg.generation.output_dir:
@@ -349,6 +352,64 @@ def _stale_evidence_ids(cfg: ChainConfig, changes: SourceChanges) -> frozenset[s
     return frozenset(stale)
 
 
+def _matches_recorded_snapshot(
+    rel: str, existing: str, recorded_snapshot: str | None
+) -> bool:
+    return (
+        recorded_snapshot is not None
+        and compute_snapshot({rel: existing}) == recorded_snapshot
+    )
+
+
+@dataclass(frozen=True)
+class _MigrationSectionPolicy:
+    force: tuple[str, ...] = ()
+    preserve: tuple[str, ...] = ()
+
+
+def _migration_section_policy(
+    rel: str,
+    existing: str,
+    snapshot_matches: bool,
+    warnings: list[str],
+) -> _MigrationSectionPolicy:
+    """Ownership policy for template-owned enrichment-denied sections.
+
+    The merge preserves an existing citation-bearing body over an uncited
+    draft block, so a deny-listed section that once got LLM content would
+    keep it forever even though the pipeline can no longer rewrite it.
+    Force the deterministic draft only when the whole file still matches
+    its last tool-written snapshot in the manifest — ``[src:]`` alone is
+    not proof of machine authorship. On drift, preserve every existing
+    denied section and warn: an uncited body may be human-authored too, and
+    whole-file snapshots cannot prove which section changed.
+    """
+    denied = enrichment_denied_sections(rel)
+    if not denied:
+        return _MigrationSectionPolicy()
+    _, existing_sections = split_sections(existing)
+    blocks: dict[str, str] = {}
+    for heading, block in existing_sections:
+        blocks.setdefault(heading, block)
+    present = tuple(heading for heading in denied if heading in blocks)
+    if not present:
+        return _MigrationSectionPolicy()
+    if snapshot_matches:
+        return _MigrationSectionPolicy(
+            force=tuple(
+                heading for heading in present if CITATION_MARK in blocks[heading]
+            )
+        )
+    for heading in present:
+        warnings.append(
+            f"{rel}: section '{heading}' is template-owned and no longer "
+            "LLM-enrichable, but the page differs from the last tool-written "
+            "snapshot — its existing body was left unchanged; reconcile it "
+            "with the deterministic rendering manually"
+        )
+    return _MigrationSectionPolicy(preserve=present)
+
+
 def _write_page(
     root: Path,
     rel: str,
@@ -360,6 +421,7 @@ def _write_page(
     dry_run: bool = False,
     force_sections: tuple[str, ...] = (),
     stale_evidence: frozenset[str] = frozenset(),
+    migration_snapshot: str | None = None,
 ) -> None:
     target = root / rel
     if target.exists():
@@ -369,13 +431,21 @@ def _write_page(
             return
         existing = target.read_text(encoding="utf-8")
         if preserve:
+            snapshot_matches = _matches_recorded_snapshot(
+                rel, existing, migration_snapshot
+            )
+            migration = _migration_section_policy(
+                rel, existing, snapshot_matches, out.warnings
+            )
             page_invalidated: list[tuple[str, list[str]]] = []
             content = merge_manual_sections(
                 existing,
                 content,
-                force=force_sections,
+                preserved=PRESERVED_SECTIONS + migration.preserve,
+                force=force_sections + migration.force,
                 stale_evidence=stale_evidence,
                 invalidated=page_invalidated,
+                allow_status_refresh=snapshot_matches,
             )
             if page_invalidated:
                 out.invalidated[rel] = page_invalidated
@@ -771,7 +841,7 @@ def run_generate(
     validation status are exactly what a real run would produce.
     """
     root = Path(root).resolve()
-    cfg = with_safe_output_dir(cfg, root)
+    cfg = _with_safe_output_dir(cfg, root)
     now = now or now_stamp()
 
     plan = plan_chain_pages(cfg, root, now)
@@ -825,6 +895,9 @@ def run_generate(
             root, draft.rel_path, draft.content, owned, result,
             preserve=preserve, dry_run=dry_run,
             force_sections=force_by_rel.get(draft.rel_path, ()),
+            migration_snapshot=(
+                previous.file_snapshots.get(draft.rel_path) if previous else None
+            ),
         )
 
     _finalize_staged_run(
@@ -860,7 +933,6 @@ class UpdateResult(WriteOutcome):
     manifest_written: bool = False
     run_file: str | None = None
     report: ValidationReport | None = None
-    warnings: list[str] = field(default_factory=list)
 
 
 def _collect_repo_contexts(
@@ -921,10 +993,21 @@ def _plan_only_assessment(
         existing = target.read_text(encoding="utf-8")
         content = draft.content
         if preserve:
+            snapshot_matches = _matches_recorded_snapshot(
+                rel, existing, previous.file_snapshots.get(rel)
+            )
+            migration = _migration_section_policy(
+                rel, existing, snapshot_matches, result.warnings
+            )
             page_invalidated: list[tuple[str, list[str]]] = []
             content = merge_manual_sections(
-                existing, content,
-                stale_evidence=stale_evidence, invalidated=page_invalidated,
+                existing,
+                content,
+                preserved=PRESERVED_SECTIONS + migration.preserve,
+                force=migration.force,
+                stale_evidence=stale_evidence,
+                invalidated=page_invalidated,
+                allow_status_refresh=snapshot_matches,
             )
             for heading, stale_ids in page_invalidated:
                 result.risks.append(
@@ -974,7 +1057,7 @@ def run_update(
     validation risks instead.
     """
     root = Path(root).resolve()
-    cfg = with_safe_output_dir(cfg, root)
+    cfg = _with_safe_output_dir(cfg, root)
     now = now or now_stamp()
 
     previous_manifest = load_manifest(root)
@@ -1034,6 +1117,7 @@ def run_update(
         _write_page(
             root, draft.rel_path, draft.content, owned, result,
             preserve=preserve, stale_evidence=stale_evidence,
+            migration_snapshot=previous.file_snapshots.get(draft.rel_path),
         )
     _finalize_staged_run(
         cfg,

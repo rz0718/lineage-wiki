@@ -17,8 +17,16 @@ from __future__ import annotations
 import difflib
 import re
 
-from ..constants import PRESERVED_SECTIONS, SCAFFOLD_STATUS_MARK
-from .templates import RAW_DOC_EXTRACTION_GAP, bq_cross_check_table
+from ..constants import (
+    GROUNDING_STATUS_MARK,
+    PRESERVED_SECTIONS,
+    SCAFFOLD_STATUS_MARK,
+)
+from .templates import (
+    RAW_DOC_EXTRACTION_GAP,
+    bq_cross_check_table,
+    repo_cross_check_repo,
+)
 
 _SECTION_HEAD = re.compile(r"(?m)^## (.+?)\s*$")
 
@@ -92,17 +100,36 @@ def _mentions_evidence(text: str, evidence_id: str) -> bool:
     return f"`{evidence_id}`" in text or f"[src: {evidence_id}]" in text
 
 
+def _status_refreshable(old: str, draft_block: str) -> bool:
+    """Whether a ``Verification Status`` body may refresh from the draft.
+
+    Pure scaffold text always tracks the current run's evidence state. An
+    LLM-grounding note (``GROUNDING_STATUS_MARK``) may be replaced by a newer
+    grounding note — a fresh ``--use-llm`` run recomputed it — but not by
+    plain scaffold text: a deterministic rerun must not silently discard
+    grounding results. verify-bq results and human-edited bodies carry
+    neither mark and are never refreshed here.
+    """
+    if SCAFFOLD_STATUS_MARK in old:
+        return True
+    if GROUNDING_STATUS_MARK in old:
+        return GROUNDING_STATUS_MARK in draft_block
+    return False
+
+
 def _reconcile_gap_bullets(
     merged: dict[str, str], stale_evidence: frozenset[str] | set[str] = frozenset()
 ) -> str:
     """Drop deterministic Known Gaps bullets that the page's own merged
     content shows as already resolved this run — a grounded Core Formula
-    citation, or a recorded divergence citing a table's BigQuery schema —
-    so the page never simultaneously claims "not extracted yet" next to an
-    extracted, cited Core Formula. Bullets reappear automatically once the
-    citation they depend on is gone (e.g. the section was invalidated and
-    reverted to scaffold), since that's re-derived from the merged content
-    every time, not tracked as separate state.
+    citation, a recorded divergence citing a table's BigQuery schema, or a
+    published citation of a repo's loaded code (the "cross-checking lands
+    in a later milestone" bullet) — so the page never simultaneously claims
+    "not extracted yet" next to an extracted, cited Core Formula. Bullets
+    reappear automatically once the citation they depend on is gone (e.g.
+    the section was invalidated and reverted to scaffold), since that's
+    re-derived from the merged content every time, not tracked as separate
+    state.
 
     ``Known Doc-vs-Code Divergences`` is a preserved section: it survives a
     scaffold rewrite verbatim, with no staleness check of its own (unlike
@@ -118,16 +145,33 @@ def _reconcile_gap_bullets(
         return block
     heading_line, *body_lines = lines
 
+    stale_prefixes = tuple(e for e in stale_evidence if e.endswith(":"))
+    stale_exact = {e for e in stale_evidence if not e.endswith(":")}
+
+    def _fresh(evidence_id: str) -> bool:
+        return evidence_id not in stale_exact and not evidence_id.startswith(
+            stale_prefixes or ("\0",)
+        )
+
     # Only a formula grounded in fresh (non-stale) raw-doc evidence resolves
     # the "not extracted from raw docs" bullet — a formula grounded purely
     # in code or a human note doesn't speak to raw-doc extraction at all.
     formula_grounded = any(
-        e.startswith("raw-doc:") and e not in stale_evidence
+        e.startswith("raw-doc:") and _fresh(e)
         for e in cited_evidence_ids(merged.get("Core Formula", ""))
     )
     evidence_text = merged.get("Core Formula", "") + merged.get(
         "Known Doc-vs-Code Divergences", ""
     )
+    # Repo cross-check bullets resolve on any published citation of that
+    # repo's files, wherever on the page it landed (code claims are not
+    # confined to Core Formula the way formula claims are).
+    page_cited = [
+        cited
+        for heading, body in merged.items()
+        if heading != "Known Gaps"
+        for cited in cited_evidence_ids(body)
+    ]
 
     kept = []
     for line in body_lines:
@@ -139,8 +183,21 @@ def _reconcile_gap_bullets(
         table = bq_cross_check_table(text)
         if table is not None:
             evidence_id = f"bq-schema:{table}"
-            if evidence_id not in stale_evidence and _mentions_evidence(
+            if _fresh(evidence_id) and _mentions_evidence(
                 evidence_text, evidence_id
+            ):
+                continue
+        repo = repo_cross_check_repo(text)
+        if repo is not None:
+            prefix = f"local-repo:{repo}:"
+            # Divergences cite evidence as backtick-wrapped ids, not [src:].
+            backticked = re.findall(
+                rf"`({re.escape(prefix)}[^`]+)`",
+                merged.get("Known Doc-vs-Code Divergences", ""),
+            )
+            if any(
+                cited.startswith(prefix) and _fresh(cited)
+                for cited in page_cited + backticked
             ):
                 continue
         kept.append(line)
@@ -148,23 +205,6 @@ def _reconcile_gap_bullets(
         return block
     body = "\n".join(kept).strip() or "None recorded."
     return f"{heading_line}\n\n{body}\n"
-
-
-def _is_scaffold_status(block: str) -> bool:
-    """True when a ``Verification Status`` block is still the untouched
-    scaffold: nothing but the generated evidence table and the single note
-    line led by ``SCAFFOLD_STATUS_MARK``. Any other non-empty line means
-    verify-bq results or a human note landed here and must be preserved."""
-    saw_mark = False
-    for line in block.splitlines()[1:]:  # skip the heading line
-        stripped = line.strip()
-        if not stripped or stripped.startswith("|"):
-            continue
-        if not saw_mark and stripped.startswith(SCAFFOLD_STATUS_MARK):
-            saw_mark = True
-            continue
-        return False
-    return saw_mark
 
 
 def _invalidation_note(stale_ids: list[str]) -> str:
@@ -183,16 +223,20 @@ def merge_manual_sections(
     force: tuple[str, ...] = (),
     stale_evidence: frozenset[str] | set[str] = frozenset(),
     invalidated: list[tuple[str, list[str]]] | None = None,
+    allow_status_refresh: bool = False,
 ) -> str:
     """Render ``draft`` while keeping manual content from ``existing``:
 
     - a section named in ``force`` always takes the draft body (the current
       run intentionally rewrote it, e.g. the LLM pipeline);
     - a section named in ``preserved`` keeps its existing body — except a
-      ``Verification Status`` body that is still the untouched scaffold
-      (only the generated table and the ``SCAFFOLD_STATUS_MARK`` note line,
-      so no verify-bq results or human notes), which refreshes from the
-      draft so evidence status cannot go stale;
+      ``Verification Status`` body that is still tool-authored (pure
+      scaffold text, or an LLM-grounding note being replaced by a newer
+      grounding note — see ``_status_refreshable``), which refreshes from
+      the draft only when ``allow_status_refresh`` proves the whole page
+      still matches its manifest snapshot; a grounding note whose page just
+      had grounded sections invalidated likewise reverts to scaffold only
+      with that ownership proof;
     - a section whose existing body carries ``[src: …]`` citations is
       evidence-written (LLM run) and survives a scaffold rewrite — *unless*
       one of its cited ids is in ``stale_evidence`` (that evidence changed
@@ -215,12 +259,17 @@ def merge_manual_sections(
 
     order: list[str] = []
     merged: dict[str, str] = {}
+    invalidated_here: list[tuple[str, list[str]]] = []
     for heading, block in draft_sections:
         old = existing_by_heading.get(heading)
         if heading in force or old is None:
             body = block
         elif heading in preserved:
-            if heading == "Verification Status" and _is_scaffold_status(old):
+            if (
+                heading == "Verification Status"
+                and allow_status_refresh
+                and _status_refreshable(old, block)
+            ):
                 body = block
             else:
                 body = old
@@ -232,14 +281,30 @@ def merge_manual_sections(
                 # The evidence this content cites changed: stale LLM prose
                 # must not survive under a valid-looking citation.
                 body = block.rstrip("\n") + "\n\n" + _invalidation_note(stale_ids) + "\n"
-                if invalidated is not None:
-                    invalidated.append((heading, stale_ids))
+                invalidated_here.append((heading, stale_ids))
             else:
                 body = old
         else:
             body = block
         order.append(heading)
         merged[heading] = body
+    if invalidated is not None:
+        invalidated.extend(invalidated_here)
+
+    if (
+        allow_status_refresh
+        and invalidated_here
+        and GROUNDING_STATUS_MARK in merged.get("Verification Status", "")
+    ):
+        # Grounded sections on this page were just reverted; a grounding
+        # status describing them must not survive them. Revert it to the
+        # scaffold draft (a fresh grounding note would have refreshed in
+        # the loop above and needs no revert).
+        draft_status = next(
+            (b for h, b in draft_sections if h == "Verification Status"), None
+        )
+        if draft_status is not None and GROUNDING_STATUS_MARK not in draft_status:
+            merged["Verification Status"] = draft_status
 
     if "Known Gaps" in merged:
         merged["Known Gaps"] = _reconcile_gap_bullets(merged, stale_evidence)

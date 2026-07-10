@@ -154,6 +154,35 @@ PRESERVED_SECTIONS = ("Verification Status", "Known Doc-vs-Code Divergences")
 # refresh it instead of preserving stale evidence state.
 SCAFFOLD_STATUS_MARK = "Unverified scaffold"
 
+# Every Verification Status body reconciled from an LLM grounding run leads
+# with this phrase (see agent/llm_pipeline). Like SCAFFOLD_STATUS_MARK it
+# identifies a tool-authored body holding no verify-bq results or human
+# notes: the section merge lets a newer grounding note replace it, and
+# reverts it to scaffold text when the page's grounded sections are
+# invalidated — verify-bq and human-written bodies carry neither mark and
+# are always preserved. Deliberately distinct wording from credentialed
+# BigQuery verification ("Verified from BigQuery schema metadata …").
+GROUNDING_STATUS_MARK = "LLM claim grounding"
+
+# Per-page-type H2 headings the LLM pipeline must never enrich, on top of
+# PRESERVED_SECTIONS / Known Gaps (llm_pipeline._FORBIDDEN_SECTIONS). These
+# sections are template-owned: procedural change-check instructions must not
+# become an LLM write surface (and could never satisfy the citation rules),
+# and the output-page schema table is rendered verbatim from the loaded
+# BigQuery schema — LLM-derived column meaning goes to `Column Meanings`.
+ENRICHMENT_DENYLIST: dict[str, tuple[str, ...]] = {
+    "Change Check": ("How to Trigger a Review", "Required Agent Behavior"),
+    "Output": ("Column Definitions",),
+}
+
+
+def enrichment_denied_sections(rel_path: str) -> tuple[str, ...]:
+    """Deny-listed (template-owned, never LLM-enrichable) section headings
+    for the page at ``rel_path``, keyed by its okf subdirectory."""
+    parts = rel_path.split("/")
+    page_type = DIR_TO_TYPE.get(parts[-2]) if len(parts) >= 2 else None
+    return ENRICHMENT_DENYLIST.get(page_type, ()) if page_type else ()
+
 # --- init scaffolding ---------------------------------------------------------
 
 MANIFEST_DIR = ".lineage-wiki"

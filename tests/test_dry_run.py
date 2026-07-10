@@ -217,6 +217,27 @@ def test_generate_preserves_verification_and_manual_sections(tmp_path, example_c
     assert update.noop
 
 
+def test_generate_preserves_human_note_appended_to_scaffold_status(
+    tmp_path, example_cfg
+):
+    run_generate(example_cfg, tmp_path, FIXED_NOW)
+    page = tmp_path / "okf" / "outputs" / "example-daily-snapshot.md"
+    current = page.read_text(encoding="utf-8")
+    status = current.split("## Verification Status\n\n", 1)[1].split(
+        "\n## ", 1
+    )[0].strip()
+    human_note = "Owner note: retain the scaffold until the review is complete."
+    _replace_section(page, "Verification Status", f"{status}\n\n{human_note}")
+
+    run_generate(example_cfg, tmp_path, FIXED_NOW)
+
+    kept = page.read_text(encoding="utf-8").split(
+        "## Verification Status\n\n", 1
+    )[1].split("\n## ", 1)[0]
+    assert "Unverified scaffold" in kept
+    assert human_note in kept
+
+
 def test_merge_manual_sections_semantics():
     existing = (
         "---\ntype: Output\n---\n# Page\n\nIntro old.\n\n"
@@ -255,21 +276,11 @@ def test_scaffold_verification_status_refreshes():
         "| BigQuery schemas | Ingested — 1 schema(s) |\n\n"
         "Unverified scaffold framework page generated deterministically.\n"
     )
-    merged = merge_manual_sections(existing, draft)
+    merged = merge_manual_sections(
+        existing, draft, allow_status_refresh=True
+    )
     assert "Ingested — 1 schema(s)" in merged
     assert "Not loaded — BigQuery unavailable" not in merged
-
-    # A human note appended after the scaffold sentence earns preservation
-    # even though the scaffold mark is still present.
-    annotated = existing.replace(
-        "generated deterministically.\n",
-        "generated deterministically.\n\nNote from the data team: numbers "
-        "were eyeballed against the Q2 close.\n",
-    )
-    merged = merge_manual_sections(annotated, draft)
-    assert "Note from the data team" in merged
-    assert "Not loaded — BigQuery unavailable" in merged
-    assert "Ingested — 1 schema(s)" not in merged
 
     # Once verify-bq has written results (no scaffold mark), they survive.
     verified = existing.replace(
@@ -280,6 +291,27 @@ def test_scaffold_verification_status_refreshes():
     merged = merge_manual_sections(verified, draft)
     assert "Verified from BigQuery schema metadata" in merged
     assert "Ingested — 1 schema(s)" not in merged
+
+
+def test_scaffold_verification_status_with_human_text_is_not_refreshable():
+    human_note = "Owner note: schema review is still in progress."
+    existing = (
+        "---\ntype: Framework\n---\n# Page\n\n"
+        "## Verification Status\n\n"
+        "Unverified scaffold framework page generated deterministically.\n\n"
+        f"{human_note}\n"
+    )
+    draft = (
+        "---\ntype: Framework\n---\n# Page\n\n"
+        "## Verification Status\n\n"
+        "LLM claim grounding has run for this chain.\n"
+    )
+
+    merged = merge_manual_sections(existing, draft)
+
+    assert "Unverified scaffold" in merged
+    assert human_note in merged
+    assert "LLM claim grounding has run" not in merged
 
 
 def test_diff_summary_reports_lines_and_sections():

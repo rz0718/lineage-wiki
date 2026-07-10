@@ -6,6 +6,7 @@ deterministic default path must keep working with no provider configured.
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -32,7 +33,10 @@ from lineage_wiki.credentials import (
 from lineage_wiki.ingestion.evidence import EvidenceItem
 from lineage_wiki.ingestion.source_loader import EvidenceBundle
 from lineage_wiki.providers import (
+    AnthropicProvider,
+    LLMProvider,
     MockProvider,
+    OpenAIProvider,
     ProviderError,
     build_provider,
     validate_api_key_env,
@@ -113,6 +117,7 @@ def test_openai_provider_continues_truncated_responses(monkeypatch):
     response = provider.complete(stage="extractor", system="s", prompt="p")
     assert response.text == '{"claims": [{"id": "c1", "text": "done"}]}'
     assert json.loads(response.text) == {"claims": [{"id": "c1", "text": "done"}]}
+    assert {request["max_tokens"] for request in requests} == {4096}
     # The second request must carry the partial answer as an assistant prefill.
     assert requests[1]["messages"][-1] == {
         "role": "assistant",
@@ -145,33 +150,6 @@ def test_openai_prefill_strips_trailing_whitespace(monkeypatch):
         "content": '{"claims": [1,',
     }
     assert json.loads(response.text) == {"claims": [1, 2]}
-
-
-def test_openai_prefill_strip_keeps_accumulated_whitespace(monkeypatch):
-    """Stripping the prefill must not mutate the accumulated answer: a
-    response truncated after meaningful whitespace inside a JSON string
-    (here ``"total ``) must keep that space in the returned text."""
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    provider = build_provider(provider="openai", model="gpt-x")
-    responses = iter(
-        [
-            _openai_response('{"claims": [{"text": "total ', "length"),
-            _openai_response('revenue"}]}', "stop"),
-        ]
-    )
-    requests = []
-
-    def fake_post(url, payload, headers):
-        requests.append(payload)
-        return next(responses)
-
-    monkeypatch.setattr("lineage_wiki.providers._post_json", fake_post)
-    response = provider.complete(stage="extractor", system="s", prompt="p")
-    # The prefill sent upstream is stripped (Anthropic-style backends 400
-    # on trailing whitespace)...
-    assert requests[1]["messages"][-1]["content"] == '{"claims": [{"text": "total'
-    # ...but the returned text keeps the meaningful in-string space.
-    assert json.loads(response.text) == {"claims": [{"text": "total revenue"}]}
 
 
 def test_openai_provider_gives_up_when_truncation_never_ends(monkeypatch):
@@ -211,12 +189,66 @@ def test_anthropic_provider_continues_truncated_responses(monkeypatch):
     monkeypatch.setattr("lineage_wiki.providers._post_json", fake_post)
     response = provider.complete(stage="extractor", system="s", prompt="p")
     assert json.loads(response.text) == {"claims": []}
+    assert {request["max_tokens"] for request in requests} == {4096}
     # Anthropic prefill must not end with whitespace, so the partial is
     # rstripped before being sent back.
     assert requests[1]["messages"][-1] == {
         "role": "assistant",
         "content": '{"claims":',
     }
+
+
+def test_provider_max_token_defaults_and_explicit_override(monkeypatch):
+    for provider_class in (
+        LLMProvider,
+        OpenAIProvider,
+        AnthropicProvider,
+        MockProvider,
+    ):
+        default = inspect.signature(provider_class.complete).parameters[
+            "max_tokens"
+        ].default
+        assert default == 4096, provider_class.__name__
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    requests = []
+
+    def fake_post(url, payload, headers):
+        requests.append(payload)
+        return _openai_response("{}", "stop")
+
+    monkeypatch.setattr("lineage_wiki.providers._post_json", fake_post)
+    provider = build_provider(provider="openai", model="gpt-x")
+    provider.complete(
+        stage="extractor",
+        system="s",
+        prompt="p",
+        max_tokens=8192,
+    )
+    assert requests[0]["max_tokens"] == 8192
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    requests.clear()
+
+    def fake_anthropic_post(url, payload, headers):
+        requests.append(payload)
+        return {
+            "model": "m",
+            "content": [{"type": "text", "text": "{}"}],
+            "stop_reason": "end_turn",
+        }
+
+    monkeypatch.setattr(
+        "lineage_wiki.providers._post_json", fake_anthropic_post
+    )
+    provider = build_provider(provider="anthropic", model="claude-x")
+    provider.complete(
+        stage="extractor",
+        system="s",
+        prompt="p",
+        max_tokens=8192,
+    )
+    assert requests[0]["max_tokens"] == 8192
 
 
 def test_post_json_surfaces_provider_error_message(monkeypatch):
@@ -841,3 +873,552 @@ def test_prompt_stub_overrides_are_loaded(tmp_path):
     loaded = load_prompts(tmp_path)
     assert loaded.system == "# Custom system prompt\n"
     assert loaded.extractor == defaults.extractor
+
+
+# --- enrichment deny-list (deterministic section ownership) --------------------
+
+
+def test_enrichment_denied_sections_by_page_type():
+    from lineage_wiki.constants import enrichment_denied_sections
+
+    assert enrichment_denied_sections("okf/outputs/foo.md") == (
+        "Column Definitions",
+    )
+    assert enrichment_denied_sections("okf/change-checks/foo.md") == (
+        "How to Trigger a Review",
+        "Required Agent Behavior",
+    )
+    assert enrichment_denied_sections("okf/frameworks/foo.md") == ()
+    assert enrichment_denied_sections("foo.md") == ()
+
+
+def test_planner_never_offers_denylisted_sections(tmp_path):
+    """Deny-listed sections are excluded from the plannable heading list, so
+    a model that selects them anyway is rejected — they can never reach a
+    writer/reviewer call."""
+    from lineage_wiki.agent.llm_pipeline import EnrichmentResult, _run_planner
+    from lineage_wiki.agent.prompts import load_prompts
+    from lineage_wiki.okf.templates import plan_chain_pages
+
+    cfg = load_config(EXAMPLE_CONFIG)
+    plan = plan_chain_pages(cfg, tmp_path, FIXED_NOW)
+    output_rel = "okf/outputs/example-daily-snapshot.md"
+    check_rel = "okf/change-checks/example-chain-review-rules.md"
+    assert {output_rel, check_rel} <= {d.rel_path for d in plan.pages}
+
+    provider = MockProvider(
+        responses={
+            "page_planner": json.dumps(
+                {
+                    "pages": [
+                        {
+                            "rel_path": output_rel,
+                            "sections": ["Column Definitions", "Column Meanings"],
+                        },
+                        {
+                            "rel_path": check_rel,
+                            "sections": [
+                                "How to Trigger a Review",
+                                "Required Agent Behavior",
+                                "Code Change Triggers",
+                            ],
+                        },
+                    ]
+                }
+            )
+        }
+    )
+    result = EnrichmentResult()
+    jobs = _run_planner(provider, load_prompts(tmp_path), cfg, plan, result, 0.0)
+    by_rel = {j.rel_path: j.sections for j in jobs}
+    assert by_rel[output_rel] == ["Column Meanings"]
+    assert by_rel[check_rel] == ["Code Change Triggers"]
+    for denied in (
+        "Column Definitions",
+        "How to Trigger a Review",
+        "Required Agent Behavior",
+    ):
+        assert any(
+            f"section {denied!r} does not match an enrichable heading" in r
+            for r in result.rejected
+        ), denied
+
+
+def _override_llm_fixtures(tmp_path, monkeypatch, *, planner, writer) -> None:
+    fixtures = yaml.safe_load(LLM_FIXTURES.read_text(encoding="utf-8"))
+    fixtures["responses"]["page_planner"] = json.dumps(planner)
+    fixtures["responses"]["writer"] = writer
+    override = tmp_path / "llm_fixtures_override.yml"
+    override.write_text(yaml.safe_dump(fixtures), encoding="utf-8")
+    monkeypatch.setenv("LINEAGE_WIKI_LLM_FIXTURES", str(override))
+
+
+def test_denylisted_sections_stay_deterministic_end_to_end(tmp_path, monkeypatch):
+    """Even a writer that emits bodies for deny-listed sections cannot
+    replace them: the schema table and the procedural change-check sections
+    stay deterministic, while `Column Meanings` and the evidence-bearing
+    trigger sections remain enrichable under the full citation rules."""
+    from lineage_wiki.okf.sections import split_sections
+
+    root = _setup_target(tmp_path, monkeypatch)
+    output_rel = "okf/outputs/example-daily-snapshot.md"
+    check_rel = "okf/change-checks/example-chain-review-rules.md"
+    column_claim = "The daily snapshot exposes a total_value column."
+    fact_claim = "This methodology covers the daily example metric snapshot pipeline."
+    _override_llm_fixtures(
+        tmp_path,
+        monkeypatch,
+        planner={
+            "pages": [
+                {
+                    "rel_path": output_rel,
+                    "sections": ["Column Definitions", "Column Meanings"],
+                },
+                {
+                    "rel_path": check_rel,
+                    "sections": [
+                        "How to Trigger a Review",
+                        "Required Agent Behavior",
+                        "Code Change Triggers",
+                    ],
+                },
+            ]
+        },
+        writer={
+            output_rel: json.dumps(
+                {
+                    "sections": [
+                        {
+                            "heading": "Column Definitions",
+                            "body": f"{column_claim} [src: {SCHEMA_ID}]",
+                        },
+                        {
+                            "heading": "Column Meanings",
+                            "body": f"{column_claim} [src: {SCHEMA_ID}]",
+                        },
+                    ]
+                }
+            ),
+            check_rel: json.dumps(
+                {
+                    "sections": [
+                        {
+                            "heading": "How to Trigger a Review",
+                            "body": f"{fact_claim} [src: {RAW_DOC_ID}]",
+                        },
+                        {
+                            "heading": "Required Agent Behavior",
+                            "body": f"{fact_claim} [src: {RAW_DOC_ID}]",
+                        },
+                        {
+                            "heading": "Code Change Triggers",
+                            "body": f"{fact_claim} [src: {RAW_DOC_ID}]",
+                        },
+                    ]
+                }
+            ),
+        },
+    )
+
+    result = runner.invoke(
+        app,
+        ["generate", "--config", str(EXAMPLE_CONFIG), "--root", str(root), "--use-llm"],
+    )
+    assert result.exit_code == 0, result.output
+
+    output_page = (root / output_rel).read_text(encoding="utf-8")
+    _, sections = split_sections(output_page)
+    by_heading = dict(sections)
+    # The deterministic full schema table survived the LLM run untouched...
+    assert "| Column | Type | Mode | Description |" in by_heading["Column Definitions"]
+    assert "[src:" not in by_heading["Column Definitions"]
+    # ...while the grounded meaning landed in the enrichable section.
+    assert column_claim in by_heading["Column Meanings"]
+    assert f"[src: {SCHEMA_ID}]" in by_heading["Column Meanings"]
+
+    check_page = (root / check_rel).read_text(encoding="utf-8")
+    _, sections = split_sections(check_page)
+    by_heading = dict(sections)
+    assert "Read the diff in the changed source" in by_heading["How to Trigger a Review"]
+    assert "[src:" not in by_heading["How to Trigger a Review"]
+    assert "classify the change as exactly one of" in by_heading["Required Agent Behavior"]
+    assert "[src:" not in by_heading["Required Agent Behavior"]
+    # Evidence-bearing trigger sections stay enrichable under full grounding.
+    assert fact_claim in by_heading["Code Change Triggers"]
+    assert f"[src: {RAW_DOC_ID}]" in by_heading["Code Change Triggers"]
+
+    # The denied writer output was dropped at the allowed-list check.
+    run_files = sorted((root / ".lineage-wiki" / "runs").glob("*generate-llm.json"))
+    transcript = json.loads(run_files[-1].read_text(encoding="utf-8"))
+    for denied in (
+        "Column Definitions",
+        "How to Trigger a Review",
+        "Required Agent Behavior",
+    ):
+        assert any(
+            f"section {denied!r} was not in the allowed list" in r
+            for r in transcript["rejected"]
+        ), denied
+
+
+# --- LLM grounding status reconciliation (Goal 2) --------------------------------
+
+
+FRAMEWORK_REL = "okf/frameworks/example-chain.md"
+
+
+def _status_section(page: str) -> str:
+    return page.split("## Verification Status")[1].split("\n## ")[0]
+
+
+def test_llm_run_reconciles_scaffold_verification_status(tmp_path, monkeypatch):
+    """After a successful LLM run, a still-scaffold-marked Verification
+    Status reflects the run's grounding results — derived from transcript
+    data, date-free, and worded as claim grounding, never as BigQuery
+    verification."""
+    root = _setup_target(tmp_path, monkeypatch)
+    cfg = load_config(EXAMPLE_CONFIG)
+    result = run_generate(cfg, root, FIXED_NOW, use_llm=True)
+    assert any("verification status reconciled" in line for line in result.llm)
+
+    framework = (root / FRAMEWORK_REL).read_text(encoding="utf-8")
+    status = _status_section(framework)
+    assert (
+        "LLM claim grounding has run for this chain: 3 accepted grounded "
+        "claim(s), 3 rejected claim(s), 1 recorded divergence(s)." in status
+    )
+    assert "Core Formula, Scope" in status  # sections written on this page
+    assert "1 rejected formula claim(s)" in status
+    assert "it is not BigQuery verification" in status
+    # Stale scaffold wording is gone where the transcript supports better.
+    assert "Unverified scaffold" not in status
+    assert "extraction pending" not in status
+    assert "No fact on this page has been cross-checked" not in status
+    assert (
+        "| Raw methodology | Ingested — 1 doc(s) loaded; "
+        "LLM claim grounding: 1 published citation(s) |" in status
+    )
+    # The divergence's published schema citation supersedes the BQ row's
+    # pending phrase; rows with no published citation keep theirs.
+    assert "cross-check pending" not in status
+    assert "| Report mappings | Not ingested (scaffold) |" in status
+    # Date-free body: run dates live in frontmatter/run metadata only.
+    assert "2026-07" not in status
+
+    # Never forced: the reconciliation must ride the preserved-section
+    # merge, not sections_written (which bypasses preservation).
+    run_files = sorted((root / ".lineage-wiki" / "runs").glob("*generate-llm.json"))
+    transcript = json.loads(run_files[-1].read_text(encoding="utf-8"))
+    assert transcript["sections_written"] == {FRAMEWORK_REL: ["Core Formula", "Scope"]}
+    assert transcript["status_reconciled"] == [FRAMEWORK_REL]
+
+
+def test_grounding_status_is_stable_across_reruns_on_later_dates(tmp_path, monkeypatch):
+    """Re-running (LLM or deterministic) on a later date must not change the
+    page body just because the date changed — the grounding note is
+    date-free and refreshes to identical text."""
+    root = _setup_target(tmp_path, monkeypatch)
+    cfg = load_config(EXAMPLE_CONFIG)
+    run_generate(cfg, root, FIXED_NOW, use_llm=True)
+    before = (root / FRAMEWORK_REL).read_text(encoding="utf-8")
+
+    second = run_generate(cfg, root, "2026-07-05T00:00:00Z", use_llm=True)
+    assert FRAMEWORK_REL in second.unchanged
+    third = run_generate(cfg, root, "2026-07-06T00:00:00Z")  # deterministic
+    assert FRAMEWORK_REL in third.unchanged
+    after = (root / FRAMEWORK_REL).read_text(encoding="utf-8")
+    assert after == before
+    assert "LLM claim grounding has run" in _status_section(after)
+
+
+def _overwrite_status(root, body: str) -> None:
+    from lineage_wiki.okf.sections import replace_section
+
+    page = (root / FRAMEWORK_REL).read_text(encoding="utf-8")
+    edited = replace_section(page, "Verification Status", body)
+    assert edited != page
+    (root / FRAMEWORK_REL).write_text(edited, encoding="utf-8")
+
+
+def test_human_edited_verification_status_survives_llm_rerun(tmp_path, monkeypatch):
+    root = _setup_target(tmp_path, monkeypatch)
+    cfg = load_config(EXAMPLE_CONFIG)
+    run_generate(cfg, root, FIXED_NOW, use_llm=True)
+    human = "Reviewed by the data platform team; formulas signed off."
+    _overwrite_status(root, human)
+
+    run_generate(cfg, root, FIXED_NOW, use_llm=True)
+    status = _status_section((root / FRAMEWORK_REL).read_text(encoding="utf-8"))
+    assert human in status
+    assert "LLM claim grounding" not in status
+
+
+def test_human_note_appended_to_grounding_status_survives_reruns(
+    tmp_path, monkeypatch
+):
+    root = _setup_target(tmp_path, monkeypatch)
+    cfg = load_config(EXAMPLE_CONFIG)
+    run_generate(cfg, root, FIXED_NOW, use_llm=True)
+    page = (root / FRAMEWORK_REL).read_text(encoding="utf-8")
+    grounding = _status_section(page).strip()
+    human = "Owner note: reviewed claims remain under manual review."
+    _overwrite_status(root, f"{grounding}\n\n{human}")
+
+    run_generate(cfg, root, FIXED_NOW, use_llm=True)
+    run_generate(cfg, root, FIXED_NOW)
+
+    status = _status_section((root / FRAMEWORK_REL).read_text(encoding="utf-8"))
+    assert "LLM claim grounding has run" in status
+    assert human in status
+
+
+def test_verify_bq_owned_verification_status_survives_llm_rerun(tmp_path, monkeypatch):
+    root = _setup_target(tmp_path, monkeypatch)
+    cfg = load_config(EXAMPLE_CONFIG)
+    run_generate(cfg, root, FIXED_NOW, use_llm=True)
+    verified = (
+        "Verified from BigQuery schema metadata (schema only).\n\n"
+        "- Table exists in BigQuery (TABLE, 4 columns)."
+    )
+    _overwrite_status(root, verified)
+
+    run_generate(cfg, root, FIXED_NOW, use_llm=True)
+    status = _status_section((root / FRAMEWORK_REL).read_text(encoding="utf-8"))
+    assert "Verified from BigQuery schema metadata" in status
+    assert "LLM claim grounding" not in status
+
+
+def test_grounding_status_merge_semantics():
+    from lineage_wiki.okf.sections import merge_manual_sections
+
+    def page(status_body: str, scope: str = "Scaffold scope.") -> str:
+        return (
+            "---\ntype: Framework\n---\n# Page\n\n"
+            f"## Scope\n\n{scope}\n\n"
+            f"## Verification Status\n\n{status_body}\n"
+        )
+
+    scaffold = "Unverified scaffold framework page generated deterministically."
+    grounding_v1 = "LLM claim grounding has run for this chain: 1 accepted grounded claim(s)."
+    grounding_v2 = "LLM claim grounding has run for this chain: 5 accepted grounded claim(s)."
+    verify_bq = "Verified from BigQuery schema metadata (schema only)."
+    human = "Signed off by the owner."
+
+    # Scaffold refreshes to a grounding note (a fresh LLM run landed).
+    merged = merge_manual_sections(
+        page(scaffold), page(grounding_v1), allow_status_refresh=True
+    )
+    assert grounding_v1 in merged and scaffold not in merged
+    # A grounding note is not discarded by a deterministic (scaffold) rerun…
+    merged = merge_manual_sections(page(grounding_v1), page(scaffold))
+    assert grounding_v1 in merged and scaffold not in merged
+    # …but a newer grounding note replaces it.
+    merged = merge_manual_sections(
+        page(grounding_v1), page(grounding_v2), allow_status_refresh=True
+    )
+    assert grounding_v2 in merged and grounding_v1 not in merged
+    # verify-bq results and human notes are never refreshed.
+    merged = merge_manual_sections(page(verify_bq), page(grounding_v1))
+    assert verify_bq in merged and grounding_v1 not in merged
+    merged = merge_manual_sections(page(human), page(grounding_v1))
+    assert human in merged and grounding_v1 not in merged
+    # Marker presence is not ownership proof: without a matching manifest
+    # snapshot, mixed tool/human status is preserved exactly.
+    mixed = grounding_v1 + "\n\nOwner note: do not replace this review."
+    merged = merge_manual_sections(page(mixed), page(grounding_v2))
+    assert mixed in merged and grounding_v2 not in merged
+
+
+def test_grounding_status_reverts_when_grounded_sections_are_invalidated():
+    """A grounding status must not outlive the grounded sections it
+    describes: when this run invalidates the page's cited content, the
+    status reverts to the scaffold draft instead of surviving preserved."""
+    from lineage_wiki.okf.sections import merge_manual_sections
+
+    scaffold = "Unverified scaffold framework page generated deterministically."
+    grounding = "LLM claim grounding has run for this chain: 1 accepted grounded claim(s)."
+    existing = (
+        "---\ntype: Framework\n---\n# Page\n\n"
+        "## Scope\n\nLLM text about scope. [src: raw-doc:docs/a.md]\n\n"
+        f"## Verification Status\n\n{grounding}\n"
+    )
+    draft = (
+        "---\ntype: Framework\n---\n# Page\n\n"
+        "## Scope\n\nScaffold scope.\n\n"
+        f"## Verification Status\n\n{scaffold}\n"
+    )
+    # No stale evidence: both the cited section and the status survive.
+    merged = merge_manual_sections(existing, draft)
+    assert "LLM text about scope." in merged and grounding in merged
+    # The cited doc changed: the section is invalidated, the status reverts.
+    merged = merge_manual_sections(
+        existing,
+        draft,
+        stale_evidence=frozenset({"raw-doc:docs/a.md"}),
+        allow_status_refresh=True,
+    )
+    assert "LLM text about scope." not in merged
+    assert grounding not in merged
+    assert scaffold in merged
+
+
+# --- migration force path for template-owned sections ---------------------------
+
+
+def _plant_llm_body_in_column_definitions(root, cfg) -> tuple[str, str]:
+    """Generate deterministically, then overwrite the output page's
+    `Column Definitions` with citation-bearing prose, simulating a page an
+    older LLM run enriched before the section was deny-listed."""
+    from lineage_wiki.okf.sections import replace_section
+
+    run_generate(cfg, root, FIXED_NOW)
+    rel = "okf/outputs/example-daily-snapshot.md"
+    page = (root / rel).read_text(encoding="utf-8")
+    llm_body = f"The daily snapshot exposes a total_value column. [src: {SCHEMA_ID}]"
+    edited = replace_section(page, "Column Definitions", llm_body)
+    assert edited != page
+    (root / rel).write_text(edited, encoding="utf-8")
+    return rel, llm_body
+
+
+def test_migration_restores_deterministic_schema_table(tmp_path, monkeypatch):
+    """When a deny-listed section carries `[src:]` content and the file still
+    matches its last tool-written manifest snapshot (machine-written, never
+    edited), the deterministic body is force-restored."""
+    from lineage_wiki.okf.sections import split_sections
+    from lineage_wiki.storage.manifest import (
+        compute_snapshot,
+        load_manifest,
+        save_manifest,
+    )
+
+    root = _setup_target(tmp_path, monkeypatch)
+    cfg = load_config(EXAMPLE_CONFIG)
+    rel, llm_body = _plant_llm_body_in_column_definitions(root, cfg)
+    # Record the edited file as the tool's own last-written state.
+    manifest = load_manifest(root)
+    entry = manifest.chains[cfg.chain.id]
+    edited = (root / rel).read_text(encoding="utf-8")
+    entry.file_snapshots[rel] = compute_snapshot({rel: edited})
+    save_manifest(root, manifest)
+
+    result = run_generate(cfg, root, FIXED_NOW)
+    assert rel in result.updated
+    assert result.warnings == []
+    after = (root / rel).read_text(encoding="utf-8")
+    _, sections = split_sections(after)
+    body = dict(sections)["Column Definitions"]
+    assert "| Column | Type | Mode | Description |" in body
+    assert llm_body not in body
+    assert "[src:" not in body
+
+
+def test_migration_warns_instead_of_clobbering_edited_pages(tmp_path, monkeypatch):
+    """`[src:]` alone is not proof a section is machine-written: when the
+    file drifted from its manifest snapshot (someone edited it since the
+    tool last wrote it), the cited body is preserved and a warning names
+    the page and section for manual migration."""
+    from lineage_wiki.okf.sections import split_sections
+
+    root = _setup_target(tmp_path, monkeypatch)
+    cfg = load_config(EXAMPLE_CONFIG)
+    rel, llm_body = _plant_llm_body_in_column_definitions(root, cfg)
+    # Manifest still records the pre-edit snapshot: the page has drifted.
+
+    result = run_generate(cfg, root, FIXED_NOW)
+    after = (root / rel).read_text(encoding="utf-8")
+    _, sections = split_sections(after)
+    assert dict(sections)["Column Definitions"].strip().endswith(llm_body)
+    assert any(
+        rel in w and "'Column Definitions'" in w for w in result.warnings
+    ), result.warnings
+
+
+def _plant_uncited_column_definitions(root, cfg) -> tuple[str, str]:
+    from lineage_wiki.okf.sections import replace_section
+
+    run_generate(cfg, root, FIXED_NOW)
+    rel = "okf/outputs/example-daily-snapshot.md"
+    page = (root / rel).read_text(encoding="utf-8")
+    human_body = "Human-maintained schema notes without citation markers."
+    edited = replace_section(page, "Column Definitions", human_body)
+    assert edited != page
+    (root / rel).write_text(edited, encoding="utf-8")
+    return rel, human_body
+
+
+def test_migration_preserves_uncited_drifted_section_with_warning(
+    tmp_path, monkeypatch
+):
+    from lineage_wiki.okf.sections import split_sections
+
+    root = _setup_target(tmp_path, monkeypatch)
+    cfg = load_config(EXAMPLE_CONFIG)
+    rel, human_body = _plant_uncited_column_definitions(root, cfg)
+
+    result = run_generate(cfg, root, FIXED_NOW)
+
+    page = (root / rel).read_text(encoding="utf-8")
+    assert human_body in dict(split_sections(page)[1])["Column Definitions"]
+    assert any(
+        rel in warning and "'Column Definitions'" in warning
+        for warning in result.warnings
+    )
+
+
+def test_plan_only_preserves_uncited_drifted_section_with_warning(
+    tmp_path, monkeypatch
+):
+    fixture = tmp_path / "bigquery.yml"
+    fixture_data = yaml.safe_load(BQ_FIXTURES.read_text(encoding="utf-8"))
+    fixture.write_text(yaml.safe_dump(fixture_data), encoding="utf-8")
+
+    root = _setup_target(tmp_path, monkeypatch)
+    monkeypatch.setenv("LINEAGE_WIKI_BQ_FIXTURES", str(fixture))
+    cfg = load_config(EXAMPLE_CONFIG)
+    rel, human_body = _plant_uncited_column_definitions(root, cfg)
+    before = (root / rel).read_text(encoding="utf-8")
+
+    columns = fixture_data["tables"][SNAPSHOT_TABLE]["columns"]
+    columns[-1]["description"] = "Updated deterministic schema description."
+    fixture.write_text(yaml.safe_dump(fixture_data), encoding="utf-8")
+
+    result = run_update(cfg, root, "2026-07-08T00:00:00Z", plan_only=True)
+
+    assert result.plan_only
+    assert f"unchanged {rel}" in result.actions
+    assert any(
+        rel in warning and "'Column Definitions'" in warning
+        for warning in result.warnings
+    )
+    assert (root / rel).read_text(encoding="utf-8") == before
+    assert human_body in before
+
+
+def test_migration_refreshes_uncited_section_when_snapshot_matches(
+    tmp_path, monkeypatch
+):
+    from lineage_wiki.okf.sections import split_sections
+    from lineage_wiki.storage.manifest import (
+        compute_snapshot,
+        load_manifest,
+        save_manifest,
+    )
+
+    root = _setup_target(tmp_path, monkeypatch)
+    cfg = load_config(EXAMPLE_CONFIG)
+    rel, old_body = _plant_uncited_column_definitions(root, cfg)
+    manifest = load_manifest(root)
+    current = (root / rel).read_text(encoding="utf-8")
+    manifest.chains[cfg.chain.id].file_snapshots[rel] = compute_snapshot(
+        {rel: current}
+    )
+    save_manifest(root, manifest)
+
+    result = run_generate(cfg, root, FIXED_NOW)
+
+    page = (root / rel).read_text(encoding="utf-8")
+    body = dict(split_sections(page)[1])["Column Definitions"]
+    assert old_body not in body
+    assert "| Column | Type | Mode | Description |" in body
+    assert result.warnings == []

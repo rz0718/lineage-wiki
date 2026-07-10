@@ -230,3 +230,30 @@ def test_existing_raw_doc_becomes_source_ref(example_cfg, tmp_path):
     framework = next(p for p in plan.pages if "frameworks/" in p.rel_path)
     fm = parse_page(framework.content).frontmatter
     assert fm["source_refs"] == ["../../raw_files/example/methodology.md"]
+
+
+def test_output_page_splits_schema_table_from_column_meanings(example_cfg, tmp_path):
+    """The deterministic schema table keeps its required `Column Definitions`
+    heading; LLM-derived business meaning gets its own top-level enrichable
+    `Column Meanings` section (a `###` subsection would be replaced along
+    with its parent, since section handling operates on `## ` headings)."""
+    plan = plan_chain_pages(example_cfg, tmp_path, FIXED_NOW)
+    output = next(p for p in plan.pages if "outputs/" in p.rel_path)
+    headings = HEADINGS.findall(output.content)
+    assert "Column Definitions" in headings
+    assert "Column Meanings" in headings
+    assert headings.index("Column Definitions") < headings.index("Column Meanings")
+
+
+def test_change_check_scaffold_has_no_raw_evidence_artifacts(example_cfg, tmp_path):
+    """The deterministic change-check rendering is what stays published when
+    LLM output is rejected — it must never paste raw docstrings, citations,
+    or table-of-contents anchors."""
+    doc = tmp_path / "raw_files" / "example" / "methodology.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text('"""a docstring"""\n\n- [TOC](#toc-anchor)\n')
+    plan = plan_chain_pages(example_cfg, tmp_path, FIXED_NOW)
+    check = next(p for p in plan.pages if "change-checks/" in p.rel_path)
+    assert '"""' not in check.content  # no pasted docstrings
+    assert "[src:" not in check.content  # scaffold carries no citations
+    assert "](#" not in check.content  # no copied TOC anchors

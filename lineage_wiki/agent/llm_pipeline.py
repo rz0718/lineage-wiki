@@ -22,14 +22,24 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..config import ChainConfig
-from ..constants import PRESERVED_SECTIONS
+from ..constants import (
+    GROUNDING_STATUS_MARK,
+    PRESERVED_SECTIONS,
+    SCAFFOLD_STATUS_MARK,
+    enrichment_denied_sections,
+)
 from ..okf.sections import (
     append_to_section,
     cited_evidence_ids,
     replace_section,
     split_sections,
 )
-from ..okf.templates import RAW_DOC_EXTRACTION_GAP, ChainPlan, bq_cross_check_gap
+from ..okf.templates import (
+    RAW_DOC_EXTRACTION_GAP,
+    ChainPlan,
+    bq_cross_check_gap,
+    repo_cross_check_gap,
+)
 from ..providers import LLMProvider
 from .grounding import _SRC_MARKER, Claim, Conflict, GroundingContext
 from .prompts import (
@@ -48,6 +58,8 @@ class LLMPipelineError(Exception):
 
 # Sections the pipeline must never write: verify-bq / divergence sections
 # are owned by their own flows, and Known Gaps is computed deterministically.
+# Per-page-type deny-listed sections (constants.ENRICHMENT_DENYLIST) are
+# excluded the same way in _run_planner via enrichment_denied_sections.
 _FORBIDDEN_SECTIONS = set(PRESERVED_SECTIONS) | {"Known Gaps"}
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$")
@@ -137,6 +149,92 @@ def _strip_gap_bullets(content: str, texts: list[str]) -> str:
     return replace_section(content, "Known Gaps", body)
 
 
+# Published-citation prefixes per framework Verification Status table row:
+# (row label, evidence-id prefixes, stale scaffold phrase the grounding
+# result replaces). Counts come from citations actually published in written
+# sections or recorded divergences — never from accepted-but-unwritten claims.
+_STATUS_ROWS = (
+    ("Raw methodology", ("raw-doc:",), "extraction pending"),
+    ("Source code", ("local-repo:",), "cross-check pending"),
+    ("BigQuery schemas", ("bq-schema:",), "cross-check pending"),
+    ("Report mappings", ("report:", "slack:"), "Not ingested (scaffold)"),
+)
+
+
+def _grounding_note(rel: str, framework_rel: str, result: "EnrichmentResult",
+                    n_accepted: int, n_rejected: int) -> str:
+    """Date-free Verification Status paragraph derived from this run's
+    transcript data. Leads with ``GROUNDING_STATUS_MARK`` so the section
+    merge can tell it from verify-bq results and human notes, and is worded
+    as claim grounding — never as (credentialed) BigQuery verification."""
+    lines = [
+        f"{GROUNDING_STATUS_MARK} has run for this chain: {n_accepted} "
+        f"accepted grounded claim(s), {n_rejected} rejected claim(s), "
+        f"{len(result.divergences)} recorded divergence(s)."
+    ]
+    written = result.sections_written.get(rel)
+    if written:
+        lines.append(
+            "Sections on this page written from accepted grounded claims "
+            "(every published fact carries a `[src:]` citation to its "
+            "evidence): " + ", ".join(written) + "."
+        )
+    if rel == framework_rel and result.gaps_added:
+        lines.append(
+            f"{len(result.gaps_added)} rejected formula claim(s) were "
+            "recorded under Known Gaps instead of being published."
+        )
+    lines.append(
+        "Claim grounding verifies verbatim quotes against locally ingested "
+        "evidence only; it is not BigQuery verification — `verify-bq` "
+        "records credentialed schema verification separately."
+    )
+    return "\n".join(lines)
+
+
+def _updated_status_rows(table: str, published: list[str]) -> str:
+    """Rewrite framework Verification Status table rows whose stale scaffold
+    phrase ("extraction pending", "cross-check pending", …) the published
+    citations supersede. Rows with no published citation keep their pending
+    wording — the transcript supports no better status for them."""
+    lines = []
+    for line in table.splitlines():
+        for label, prefixes, pending in _STATUS_ROWS:
+            if not line.startswith(f"| {label} |"):
+                continue
+            n = len({e for e in published if e.startswith(prefixes)})
+            if n:
+                line = line.replace(
+                    pending, f"LLM claim grounding: {n} published citation(s)"
+                )
+            break
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _with_grounding_status(content: str, note: str, published: list[str] | None) -> str:
+    """Rewrite a still-scaffold-marked Verification Status body: the
+    scaffold note paragraph becomes the grounding note, and (framework only,
+    when ``published`` is given) stale table-row phrases are updated. Bodies
+    without the scaffold mark (verify-bq output pages, human edits) are left
+    untouched, matching the preserved-section merge rules downstream."""
+    _, sections = split_sections(content)
+    block = next((b for h, b in sections if h == "Verification Status"), None)
+    if block is None or SCAFFOLD_STATUS_MARK not in block:
+        return content
+    body = block.split("\n", 1)[1] if "\n" in block else ""
+    paragraphs = []
+    for para in body.split("\n\n"):
+        if SCAFFOLD_STATUS_MARK in para:
+            paragraphs.append(note)
+        elif published is not None and para.lstrip().startswith("|"):
+            paragraphs.append(_updated_status_rows(para, published))
+        else:
+            paragraphs.append(para)
+    new_body = "\n\n".join(p for p in paragraphs if p.strip())
+    return replace_section(content, "Verification Status", new_body)
+
+
 @dataclass
 class PageJob:
     rel_path: str
@@ -158,6 +256,10 @@ class EnrichmentResult:
     # the planner's raw page entries, before filtering — kept in the
     # transcript so an empty job list is diagnosable.
     planner_pages: list = field(default_factory=list)
+    # pages whose scaffold-marked Verification Status was rewritten into an
+    # LLM grounding note (never via sections_written/force — the normal
+    # preserved-section merge decides whether it lands).
+    status_reconciled: list[str] = field(default_factory=list)
     rejected: list[str] = field(default_factory=list)  # human-readable reasons
     reviewer_issues: list[str] = field(default_factory=list)
     summary: list[str] = field(default_factory=list)
@@ -183,7 +285,11 @@ def _run_planner(
 ) -> list[PageJob]:
     drafts = {d.rel_path: d.content for d in plan.pages}
     available_by_rel = {
-        rel: sorted(_headings(content) - _FORBIDDEN_SECTIONS)
+        rel: sorted(
+            _headings(content)
+            - _FORBIDDEN_SECTIONS
+            - set(enrichment_denied_sections(rel))
+        )
         for rel, content in drafts.items()
     }
     items = plan.bundle.all_items()
@@ -412,6 +518,15 @@ def run_llm_enrichment(
             if e.startswith("bq-schema:")
         }
         resolved.extend(bq_cross_check_gap(t) for t in sorted(bq_tables_addressed))
+        # Same rule for the per-repo "cross-checking lands in a later
+        # milestone" bullet: a published citation of that repo's loaded
+        # files (id form `local-repo:<name>:<path>`) supersedes it.
+        repos_addressed = {
+            e.split(":", 2)[1]
+            for e in written_ids + result.divergence_evidence_ids
+            if e.startswith("local-repo:")
+        }
+        resolved.extend(repo_cross_check_gap(r) for r in sorted(repos_addressed))
         if resolved:
             new_content = _strip_gap_bullets(content, resolved)
             if new_content != content:
@@ -433,6 +548,41 @@ def run_llm_enrichment(
             )
         if content != drafts[framework_rel]:
             result.drafts[framework_rel] = content
+            drafts[framework_rel] = content
+
+    # Reconcile Verification Status on pages that now carry grounded
+    # content: derive a deterministic, date-free grounding note from this
+    # run's data and rewrite it *in the draft only* where the section is
+    # still scaffold-marked. It is deliberately never added to
+    # sections_written — forced sections bypass preservation during the
+    # merge, which would let this update trample verify-bq results or
+    # human notes; the preserved-section merge decides whether it lands.
+    published = list(
+        dict.fromkeys(
+            [e for ids in result.section_evidence_ids.values() for e in ids]
+            + result.divergence_evidence_ids
+        )
+    )
+    if published:
+        n_rejected = sum(1 for r in result.rejected if r.startswith("claim "))
+        status_pages = set(result.sections_written)
+        # The framework's status table summarizes chain-wide evidence
+        # state, so it is reconciled whenever anything was published.
+        if framework_rel in drafts:
+            status_pages.add(framework_rel)
+        for rel in sorted(status_pages):
+            content = drafts.get(rel)
+            if content is None:
+                continue
+            note = _grounding_note(
+                rel, framework_rel, result, len(claims), n_rejected
+            )
+            rows = published if rel == framework_rel else None
+            updated = _with_grounding_status(content, note, rows)
+            if updated != content:
+                drafts[rel] = updated
+                result.drafts[rel] = updated
+                result.status_reconciled.append(rel)
 
     n_accepted = len(claims)
     result.summary = [
@@ -448,6 +598,11 @@ def run_llm_enrichment(
         f"gaps added from rejected formulas: {len(result.gaps_added)}",
         f"gaps resolved: {len(result.gaps_resolved)}",
     ]
+    if result.status_reconciled:
+        result.summary.append(
+            "verification status reconciled: "
+            + ", ".join(result.status_reconciled)
+        )
     if result.reviewer_issues:
         result.summary.append(
             f"reviewer issues: {len(result.reviewer_issues)}"
@@ -478,5 +633,6 @@ def run_llm_enrichment(
         "gaps_added": list(result.gaps_added),
         "gaps_resolved": list(result.gaps_resolved),
         "sections_written": dict(result.sections_written),
+        "status_reconciled": list(result.status_reconciled),
     }
     return result

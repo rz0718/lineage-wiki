@@ -9,7 +9,12 @@ from lineage_wiki.okf.sections import (
     cited_evidence_ids,
     merge_manual_sections,
 )
-from lineage_wiki.okf.templates import RAW_DOC_EXTRACTION_GAP, bq_cross_check_gap
+from lineage_wiki.okf.templates import (
+    RAW_DOC_EXTRACTION_GAP,
+    bq_cross_check_gap,
+    repo_cross_check_gap,
+    repo_cross_check_repo,
+)
 from lineage_wiki.storage.manifest import SourceChanges
 
 from .conftest import EXAMPLE_CONFIG, FIXED_NOW
@@ -202,6 +207,134 @@ def test_merge_bq_gap_reappears_when_preserved_divergence_evidence_goes_stale():
         existing, draft, stale_evidence=frozenset({f"bq-schema:{TABLE}"})
     )
     assert bq_cross_check_gap(TABLE) in stale
+
+
+REPO_GAP = repo_cross_check_gap("pipeline")
+REPO_GAP_DRAFT = (
+    "---\ntype: Framework\n---\n# Page\n\n"
+    "## Core Formula\n\nScaffold formula.\n\n"
+    "## Known Doc-vs-Code Divergences\n\nNone recorded yet.\n\n"
+    "## Known Gaps\n\n"
+    f"- {REPO_GAP}\n"
+    "- Some unrelated gap.\n"
+)
+
+
+def test_repo_cross_check_gap_roundtrip():
+    assert repo_cross_check_repo(repo_cross_check_gap("engine")) == "engine"
+    assert repo_cross_check_repo("Some other bullet.") is None
+    assert "later milestone" in repo_cross_check_gap("engine")
+
+
+def test_merge_drops_repo_gap_when_published_citation_covers_repo():
+    """A published citation of the repo's loaded files supersedes the
+    "cross-checking lands in a later milestone" bullet — wherever on the
+    page the citation landed."""
+    existing = (
+        "---\ntype: Framework\n---\n# Page\n\n"
+        "## Core Formula\n\n`x = y` [src: local-repo:pipeline:main.py]\n\n"
+        "## Known Doc-vs-Code Divergences\n\nNone recorded yet.\n\n"
+        "## Known Gaps\n\n"
+        f"- {REPO_GAP}\n"
+        "- Some unrelated gap.\n"
+    )
+    merged = merge_manual_sections(existing, REPO_GAP_DRAFT)
+    assert REPO_GAP not in merged
+    assert "Some unrelated gap." in merged
+    # A citation of some *other* repo does not resolve this repo's bullet.
+    other = existing.replace("local-repo:pipeline:main.py", "local-repo:other:main.py")
+    assert REPO_GAP in merge_manual_sections(other, REPO_GAP_DRAFT)
+
+
+def test_merge_repo_gap_reappears_when_repo_evidence_goes_stale():
+    existing = (
+        "---\ntype: Framework\n---\n# Page\n\n"
+        "## Core Formula\n\n`x = y` [src: local-repo:pipeline:main.py]\n\n"
+        "## Known Doc-vs-Code Divergences\n\nNone recorded yet.\n\n"
+        "## Known Gaps\n\n"
+        f"- {REPO_GAP}\n"
+    )
+    merged = merge_manual_sections(
+        existing, REPO_GAP_DRAFT, stale_evidence=frozenset({"local-repo:pipeline:"})
+    )
+    assert REPO_GAP in merged
+
+
+def test_merge_drops_repo_gap_when_divergence_cites_repo_file():
+    """Divergences cite evidence as backtick-wrapped ids; a preserved
+    divergence citing the repo's code also counts as cross-checking."""
+    existing = (
+        "---\ntype: Framework\n---\n# Page\n\n"
+        "## Core Formula\n\nScaffold formula.\n\n"
+        "## Known Doc-vs-Code Divergences\n\n"
+        "- **Rounding** — doc vs code mismatch "
+        "(evidence: `raw-doc:docs/a.md`, `local-repo:pipeline:main.py`)\n\n"
+        "## Known Gaps\n\n"
+        f"- {REPO_GAP}\n"
+    )
+    assert REPO_GAP not in merge_manual_sections(existing, REPO_GAP_DRAFT)
+    stale = merge_manual_sections(
+        existing, REPO_GAP_DRAFT, stale_evidence=frozenset({"local-repo:pipeline:"})
+    )
+    assert REPO_GAP in stale
+
+
+def test_update_reverts_grounding_status_when_cited_doc_changes(tmp_path, monkeypatch):
+    """The grounding status must not outlive the grounded sections it
+    describes: once the update run invalidates them, the status reverts to
+    scaffold wording (and the next --use-llm run can refresh it again)."""
+    root = _setup_target(tmp_path, monkeypatch)
+    cfg = load_config(EXAMPLE_CONFIG)
+    run_generate(cfg, root, FIXED_NOW, use_llm=True)
+
+    framework = root / "okf" / "frameworks" / "example-chain.md"
+    status_before = framework.read_text(encoding="utf-8").split(
+        "## Verification Status"
+    )[1].split("\n## ")[0]
+    assert "LLM claim grounding has run" in status_before
+
+    (root / "raw_files" / "example" / "methodology.md").write_text(
+        "# Example Methodology v2\n\nEverything changed.\n", encoding="utf-8"
+    )
+    run_update(cfg, root, LATER)
+
+    status_after = framework.read_text(encoding="utf-8").split(
+        "## Verification Status"
+    )[1].split("\n## ")[0]
+    assert "LLM claim grounding" not in status_after
+    assert "Unverified scaffold" in status_after
+
+
+def test_update_preserves_human_note_appended_to_grounding_status(
+    tmp_path, monkeypatch
+):
+    from lineage_wiki.okf.sections import replace_section
+
+    root = _setup_target(tmp_path, monkeypatch)
+    cfg = load_config(EXAMPLE_CONFIG)
+    run_generate(cfg, root, FIXED_NOW, use_llm=True)
+
+    framework = root / "okf" / "frameworks" / "example-chain.md"
+    page = framework.read_text(encoding="utf-8")
+    status = page.split("## Verification Status", 1)[1].split("\n## ", 1)[0]
+    human_note = "Owner note: investigate the invalidated evidence manually."
+    edited = replace_section(
+        page,
+        "Verification Status",
+        f"{status.strip()}\n\n{human_note}",
+    )
+    framework.write_text(edited, encoding="utf-8")
+
+    (root / "raw_files" / "example" / "methodology.md").write_text(
+        "# Example Methodology v2\n\nEverything changed.\n", encoding="utf-8"
+    )
+    run_update(cfg, root, LATER)
+
+    status_after = framework.read_text(encoding="utf-8").split(
+        "## Verification Status", 1
+    )[1].split("\n## ", 1)[0]
+    assert "LLM claim grounding has run" in status_after
+    assert human_note in status_after
 
 
 def test_stale_evidence_ids_mapping():

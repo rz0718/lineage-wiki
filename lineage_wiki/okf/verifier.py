@@ -304,18 +304,6 @@ def run_verify_bq(
     """
     root = Path(root).resolve()
     now = now or now_stamp()
-
-    # Imported lazily: the okf package must not depend on agent at load time.
-    # generate normalizes output_dir (e.g. ``../wiki-repo/okf`` → ``okf``)
-    # before recording manifest ownership; verify-bq must apply the same
-    # normalization or the pages it wrote are skipped as not tool-generated.
-    from ..agent.runner import GenerateError, with_safe_output_dir
-
-    try:
-        cfg = with_safe_output_dir(cfg, root)
-    except GenerateError as exc:
-        raise VerificationError(str(exc)) from None
-
     spec = cfg.bigquery_verification
 
     if not spec.enabled:

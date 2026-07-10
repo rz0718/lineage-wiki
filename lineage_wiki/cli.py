@@ -186,6 +186,8 @@ def generate(
 
     for line in result.llm:
         typer.echo(f"llm       {line}")
+    for warning in result.warnings:
+        typer.secho(f"warning   {warning}", fg=typer.colors.YELLOW)
 
     if dry_run:
         typer.secho(

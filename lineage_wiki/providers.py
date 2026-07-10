@@ -27,6 +27,10 @@ import yaml
 
 FIXTURES_ENV = "LINEAGE_WIKI_LLM_FIXTURES"
 
+# Broadly compatible with legacy OpenAI/Anthropic models. Callers may request
+# a larger value explicitly; continuation handles responses that hit this cap.
+DEFAULT_MAX_TOKENS = 4096
+
 # Pipeline stage names — fixture files key their responses by these.
 STAGES = ("page_planner", "extractor", "writer", "reviewer")
 
@@ -60,7 +64,7 @@ class LLMProvider:
         system: str,
         prompt: str,
         temperature: float = 0.0,
-        max_tokens: int = 32000,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
     ) -> LLMResponse:
         raise NotImplementedError
 
@@ -147,7 +151,15 @@ class OpenAIProvider(LLMProvider):
     api_key_env: str = "OPENAI_API_KEY"
     name = "openai"
 
-    def complete(self, *, stage, system, prompt, temperature=0.0, max_tokens=32000):
+    def complete(
+        self,
+        *,
+        stage,
+        system,
+        prompt,
+        temperature=0.0,
+        max_tokens=DEFAULT_MAX_TOKENS,
+    ):
         key = _api_key(self.api_key_env, self.name)
         messages = [
             {"role": "system", "content": system},
@@ -160,12 +172,11 @@ class OpenAIProvider(LLMProvider):
             # trailing assistant message; OpenRouter (and Anthropic-style
             # backends) treat that as a prefill and resume mid-token-stream.
             # Anthropic backends reject prefill with trailing whitespace
-            # (HTTP 400), so send a stripped copy — but keep ``accumulated``
-            # itself intact, since trailing whitespace can be meaningful
-            # (e.g. inside a truncated JSON string value).
-            prefill = accumulated.rstrip()
+            # (HTTP 400), so strip it (insignificant between JSON tokens).
+            if accumulated:
+                accumulated = accumulated.rstrip()
             request_messages = messages + (
-                [{"role": "assistant", "content": prefill}] if prefill else []
+                [{"role": "assistant", "content": accumulated}] if accumulated else []
             )
             data = _post_json(
                 f"{self.base_url.rstrip('/')}/chat/completions",
@@ -226,20 +237,26 @@ class AnthropicProvider(LLMProvider):
     api_key_env: str = "ANTHROPIC_API_KEY"
     name = "anthropic"
 
-    def complete(self, *, stage, system, prompt, temperature=0.0, max_tokens=32000):
+    def complete(
+        self,
+        *,
+        stage,
+        system,
+        prompt,
+        temperature=0.0,
+        max_tokens=DEFAULT_MAX_TOKENS,
+    ):
         key = _api_key(self.api_key_env, self.name)
         accumulated = ""
         model_seen = self.model
         for _ in range(1 + MAX_CONTINUATIONS):
             messages = [{"role": "user", "content": prompt}]
-            prefill = accumulated.rstrip()
-            if prefill:
+            if accumulated:
                 # Assistant prefill makes the model resume the cut-off
                 # answer. The API rejects prefill with trailing whitespace,
-                # so send a stripped copy — but keep ``accumulated`` itself
-                # intact, since trailing whitespace can be meaningful (e.g.
-                # inside a truncated JSON string value).
-                messages.append({"role": "assistant", "content": prefill})
+                # so strip it (insignificant between JSON tokens).
+                accumulated = accumulated.rstrip()
+                messages.append({"role": "assistant", "content": accumulated})
             data = _post_json(
                 f"{self.base_url.rstrip('/')}/v1/messages",
                 {
@@ -299,7 +316,15 @@ class MockProvider(LLMProvider):
         responses = data.get("responses", data)
         return cls(responses=dict(responses), origin=str(path))
 
-    def complete(self, *, stage, system, prompt, temperature=0.0, max_tokens=32000):
+    def complete(
+        self,
+        *,
+        stage,
+        system,
+        prompt,
+        temperature=0.0,
+        max_tokens=DEFAULT_MAX_TOKENS,
+    ):
         entry = self.responses.get(stage)
         if entry is None:
             raise ProviderError(
